@@ -92,6 +92,30 @@ Claude 委托 Codex 的完整规则、Skill 和参数调用脚本见[浏览器�
 
 通道和中台共用一个 Node 进程，外部调用应异步等待。内置飞书通道的用户查询、发送和更新均异步调用 CLI，发送期间中台仍能接收事件和心跳。
 
+### QQ 机器人
+
+内置的 [QQ 通道](../plugins/qq/channel.ts)走官方 QQ Bot OpenAPI 和 Gateway WebSocket，只用 Node 内置的 `WebSocket`、`fetch` 和 `node:crypto`，不需要 SDK 或公网回调地址。它处理：
+
+- `hello` 后发 `identify`，收到 `READY` 建立会话；断线后带 `session_id` 和 `seq` 发 `resume`；
+- 按服务端给的心跳周期发送心跳；
+- `INTERACTION_CREATE`（消息按钮）调用 `hub.answer`，再调用 `PUT /interactions/<id>` 确认；
+- `C2C_MESSAGE_CREATE` 只记日志，不当作卡片回答；
+- 卡片以 Markdown 加内联键盘发出；QQ 没有改消息接口，卡片状态变化只更新中台投递版本，不重复发消息。
+
+`config.json` 写 `appId`、`clientSecret`，以及二选一的 `user`（单聊 OpenID）或 `group`（群 OpenID）；`rules.json` 的 `answerers` 填 OpenID。按钮回调中的 `button_data` 带卡片编号、选项和一个稳定引用；中台用它核对回答是否来自发出去的那张卡片。
+
+### QQ（NapCat）
+
+内置的 [NapCat 通道](../plugins/napcat/channel.ts)走 OneBot 11：HTTP 调 `send_private_msg` / `send_group_msg`，正向 WebSocket 收 `message` 事件。它和官方 QQ Bot 插件分开，因为账号类型、鉴权方式和平台能力都不同。它只用 Node 内置的 `fetch` 和 `WebSocket`，不引入 SDK。
+
+- 一个实例只发一个 QQ 号或一个群，`user` 与 `group` 二选一；
+- 卡片用文字和 `#1`、`#2` 编号发出，引用卡片消息后回复编号才算回答；
+- 只有一张卡片在等时允许直接回编号；多张时必须引用，通道会回一条提示而不是猜；
+- 发送成功后用稳定引用 `napcat-card-<卡片号>` 上报，重复投递不会在聊天里发第二张；
+- WebSocket 断开后每 5 秒重连，HTTP 和 WebSocket 共用可选的 `token`。
+
+NapCat 运行在个人 QQ 账号上，使用前要确认平台规则和账号风险；官方 QQ Bot 仍是需要资质时的选择。
+
 ## 事件插件
 
 从 [hello-source/source.ts](../examples/plugins/hello-source/source.ts) 开始。它检查 `x-shop-signature` 中的 HMAC-SHA256，再把订单变成事件。

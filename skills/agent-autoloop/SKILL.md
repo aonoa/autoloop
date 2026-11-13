@@ -118,6 +118,10 @@ Claude 主任务要委托 Codex 操作网页时，从 `examples/recipes/browser-
 
 **只会发文字的（钉钉、企微的群机器人，Slack、Discord 的 Webhook）**：用 `plugins/webhook/channel.ts`，`config.json` 的通道项写 `"use": "webhook"`、`"platform": "dingtalk"` 和 `"url": "已有的 Webhook 地址"`；平台也可选 `wecom`、`slack`、`discord`。别的平台只要收 JSON POST 也能接：不写 `platform`，写 `url` 和带 `{text}` 的 `body`，比如 Telegram 写 `"url": "https://api.telegram.org/bot<机器人令牌>/sendMessage"`、`"body": { "chat_id": "…", "text": "{text}" }`。`rules.json` 里写 `"links": true`，卡片链接本身就能回答；`config.json` 的 `hub.publicUrl` 要配成手机或电脑能打开的地址。
 
+**QQ 机器人**：用官方开放平台的 AppID、AppSecret 和 OpenID，内置 `plugins/qq/channel.ts` 走 Gateway WebSocket，不需要公网回调。`config.json` 写 `"use"` 可省略，通道 id 用 `qq`；选项是 `appId`、`clientSecret`，以及二选一的 `user`（单聊 OpenID）或 `group`（群 OpenID）。`rules.json` 的 `answerers` 填 OpenID。QQ 没有改消息接口，已发卡片的状态变化不会刷新原消息，也不会重复发；要查完整状态用 `agent-autoloop status`。
+
+**QQ（NapCat）**：已经用 NapCat 登录 QQ 账号时，内置 `plugins/napcat/channel.ts` 走 OneBot 11。`config.json` 写 `url`（HTTP）、`ws`（正向 WebSocket）、可选 `token`，以及二选一的 `user`（QQ 号）或 `group`（群号）；`rules.json` 的 `answerers` 填 QQ 号。卡片是文字加 `#1`、`#2`，引用卡片回复编号才回答；只有一张卡片在等时可直接回编号，多张时会提示引用。这是个人号方案，和官方 QQ Bot 不要混用同一个通道 id。
+
 **有按钮的新通道**：在 `~/.agent-autoloop/plugins/<名字>/channel.ts` 写一个，照 `plugins/feishu/channel.ts`：循环领卡片、发或改、报告；收到点击转给 `hub.answer`。协议在 `docs/protocol.md`，用别的语言写也行，只要会发 HTTP。
 
 ## 交付流水线
