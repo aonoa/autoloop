@@ -494,6 +494,7 @@ test("GitHub: signed or not taken, and what it says becomes a plain event", () =
       summary: "首页打不开",
       detail: "详情",
       link: "https://github.com/a/b/issues/12",
+      actor: "",
     },
   ]);
   assert.throws(() => github({ headers: headers(body, { "x-hub-signature-256": "sha256=00" }), body, secret }));

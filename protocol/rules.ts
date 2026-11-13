@@ -13,6 +13,9 @@ export class RulesError extends Error {
 }
 
 const ACCESS = ["read", "edit", "full"];
+const ACCEPT = ["off", "gate", "assess"];
+const ADMISSION = ["named", "any"];
+const STYLES = ["im", "async"];
 const TELLS = ["always", "needed", "never"];
 const ID = /^[a-z][a-z0-9-]*$/;
 const TYPE_PATTERN = /^(\*|[a-z][a-z0-9_.-]{0,63}(\.\*)?)$/;
@@ -80,14 +83,16 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["name", isText, NOT_EMPTY],
     ["when", isObject, "要是一个对象"],
     ["to", isKeyOf(rules.agents), `不是已登记的 Agent：${isObject(rule) ? rule.to : ""}`],
-    ["cwd", isFolder, FOLDER],
+    ["cwd", isFolder, FOLDER, true],
     ["skill", isText, NOT_EMPTY, true],
     ["prompt", isText, NOT_EMPTY, true],
     ["title", isTitle, "要是字母或数字开头、不含空白的一个词，占位符只能用 {id}、{subject}", true],
     ["group", isText, NOT_EMPTY, true],
+    ["project", isText, NOT_EMPTY, true],
     ["parallel", isCount, "要是正整数", true],
     ["maxActive", isCount, "要是正整数", true],
     ["resume", (value) => typeof value === "boolean", "只能是 true 或 false", true],
+    ["speculate", (value) => typeof value === "boolean", "只能是 true 或 false", true],
     ["tell", (value) => TELLS.includes(value as string), `只能是 ${TELLS.join("、")}`, true],
     ["emits", isObject, "要是一个对象", true],
     ["channels", isSomeWords, "要是通道编号的列表", true],
@@ -118,6 +123,16 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
   for (const channel of isSomeWords(rule.channels) ? (rule.channels as string[]) : []) {
     if (!Object.hasOwn(rules.channels, channel)) issues.push(`${where}的 channels 不是已登记的通道：${channel}`);
   }
+  // A project is a shorthand: it names the group and, when the rule names no folder, keeps work under it.
+  if (rule.project !== undefined) {
+    if (typeof rule.project !== "string" || !/^[A-Za-z0-9._-]+$/.test(rule.project)) {
+      issues.push(`${where}的 project 只能用字母、数字和 . _ -`);
+    }
+    rule.group ??= rule.project;
+    if (rule.cwd === undefined) rule.cwd = `~/${rule.project}`;
+  }
+  // A rule still needs a folder: either its own, or one the project derives.
+  if (rule.cwd === undefined) issues.push(`${where}缺少 cwd（也可以写 project，用它派生目录）`);
   rule.group ??= rule.name;
   rule.tell ??= "needed";
 }
@@ -133,6 +148,7 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
   checkFields(issues, "rules.json ", parsed, [
     ["timezone", isZone, "不是有效的时区", true],
     ["askFirst", isWords, "要是文字的列表", true],
+    ["policy", isObject, "要是一个对象", true],
     ["sources", isObject, "要是一个对象"],
     ["agents", isObject, "要是一个对象"],
     ["channels", isObject, "要是一个对象", true],
@@ -146,13 +162,40 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
   rules.askFirst ??= ASK_FIRST;
   rules.channels ??= {};
   rules.elsewhere ??= [];
+  if (isObject(parsed) && parsed.policy !== undefined) {
+    checkFields(issues, "rules.json 的 policy ", parsed.policy, [
+      ["accept", (value) => ACCEPT.includes(value as string), `只能是 ${ACCEPT.join("、")}`, true],
+      ["assessor", isText, NOT_EMPTY, true],
+      ["fanout", (value) => typeof value === "boolean", "要是 true 或 false", true],
+    ]);
+    const policy = parsed.policy as { accept?: string; assessor?: string };
+    if ((policy.accept ?? "off") === "assess" && policy.assessor === undefined) {
+      issues.push("rules.json 的 policy 写了 accept: assess，还要写 assessor：用哪个 Agent 研判");
+    }
+    if (policy.assessor !== undefined && !Object.hasOwn(rules.agents, policy.assessor)) {
+      issues.push(`rules.json 的 policy 里的 assessor 不是已登记的 Agent：${policy.assessor}`);
+    }
+    if (policy.assessor !== undefined && (policy.accept ?? "off") !== "assess") {
+      issues.push("rules.json 的 policy 写了 assessor，就要把 accept 写成 assess");
+    }
+    // `accept` is the gate's switch; `fanout` alone must not turn it on.
+    rules.policy!.accept ??= "off";
+  }
   if (SCHEDULE in rules.sources) issues.push(`来源 ${SCHEDULE} 是保留的，定时用规则的 cron`);
   for (const [id, source] of Object.entries(rules.sources)) {
     if (!ID.test(id)) issues.push(`来源的编号${ID_WORDS}：${id}`);
     checkFields(issues, `来源 ${id} `, source, [
       ["name", isText, NOT_EMPTY],
       ["adapter", isText, NOT_EMPTY, true],
+      ["policy", isObject, "要是一个对象", true],
     ]);
+    if (isObject(source) && source.policy !== undefined) {
+      checkFields(issues, `来源 ${id} 的 policy `, source.policy, [
+        ["allowlist", isWords, "要是身份的列表", true],
+        ["admission", (value) => ADMISSION.includes(value as string), `只能是 ${ADMISSION.join("、")}`, true],
+        ["bots", isWords, "要是身份的列表", true],
+      ]);
+    }
   }
   rules.sources[SCHEDULE] = { name: "定时" };
   for (const [id, channel] of Object.entries(rules.channels)) {
@@ -161,6 +204,7 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
       ["name", isText, NOT_EMPTY],
       ["answerers", isWords, "要是文字的列表", true],
       ["links", (value) => typeof value === "boolean", "要是 true 或 false", true],
+      ["style", (value) => STYLES.includes(value as string), `只能是 ${STYLES.join("、")}`, true],
     ]);
   }
   for (const channel of rules.defaultChannels ?? []) {

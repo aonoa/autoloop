@@ -11,6 +11,7 @@ import {
   configuration,
   eventsOf,
   jobOf,
+  takenEventsOf,
   openInScope,
   pauseOf,
   routingOf,
@@ -19,7 +20,8 @@ import {
   workerOf,
   workers,
 } from "./query.ts";
-import { cronOf, eventRule, ruleOf, SCHEDULE, typeMatches, type Rule, type Rules } from "./rules.ts";
+import { admit, cronOf, eventRule, ruleOf, SCHEDULE, typeMatches, type Rule, type Rules } from "./rules.ts";
+import { stageOf } from "./stage.ts";
 import {
   addUsage,
   ANSWER_BY,
@@ -109,6 +111,8 @@ function add(draft: Draft, table: Table, fields: Row) {
 
 const ruleNamed = (draft: Draft, name: string) => ruleOf(draft.rules, name);
 function assignQueued(draft: Draft, run: Row) {
+  // A round with a kind belongs to the agent it was queued for: an assessor or a speculative try is not the rule's work.
+  if (run.kind) return;
   const config = draft.view.get("config", "rules")!;
   const rule = ruleOf(config.value as Rules, run.rule);
   if (!rule) return;
@@ -135,7 +139,8 @@ function settleSession(draft: Draft, run: Row) {
     put(draft, "runs", run.id, nulls("session", "resume"));
   } else if (session !== carried) put(draft, "runs", run.id, { resume: session });
 }
-const hopsOf = (draft: Draft, run: Row) => Math.max(0, ...eventsOf(draft.view, run.id).map((event) => event.hops ?? 0));
+const hopsOf = (draft: Draft, run: Row) =>
+  Math.max(0, ...takenEventsOf(draft.view, run.id).map((event) => event.hops ?? 0));
 
 function closeCard(draft: Draft, card: Row, result: string, by: string | null = null, note: string | null = null) {
   const closed = { state: "closed", closed_at: draft.at, version: card.version + 1 };
@@ -180,12 +185,36 @@ const notify = (draft: Draft, key: string, title: string, text: string, extra: R
   createCard(draft, { key, kind: "notice", title, text, ...extra });
 
 /** A queued run of this rule and thread takes the event, so what comes in while it waits is handled together. */
-function enqueue(draft: Draft, rule: Rule, event: number, lane: string, resume?: string | null) {
+function enqueue(
+  draft: Draft,
+  rule: Rule,
+  event: number,
+  lane: string,
+  resume?: string | null,
+  fromPerson = false,
+  speculative = false,
+) {
+  // A matter waiting on a person after a blocked or failed report takes no automatic input: only their message releases it.
+  if (!fromPerson) {
+    const stage = stageOf(draft.view, draft.rules, rule.name, lane, draft.now);
+    if (stage === "person/blocked" || stage === "person/failed") return null;
+  }
   const rulesVersion = draft.view.get("config", "rules")!.version;
   const stamps = { not_before: draft.at, created_at: draft.at, rules_version: rulesVersion };
+  const kind = speculative ? "speculate" : undefined;
   const run =
-    rows(draft.view, "runs", { rule: rule.name, lane, state: "queued" })[0] ??
-    add(draft, "runs", { rule: rule.name, agent: rule.to, grp: rule.group, lane, state: "queued", ...stamps });
+    rows(draft.view, "runs", { rule: rule.name, lane, state: "queued" }).find(
+      (other) => (other.kind ?? null) === (kind ?? null),
+    ) ??
+    add(draft, "runs", {
+      rule: rule.name,
+      agent: rule.to,
+      grp: rule.group,
+      lane,
+      state: "queued",
+      ...(kind && { kind }),
+      ...stamps,
+    });
   put(draft, "run_events", `${run.id}:${event}`, { run_id: run.id, event_id: event });
   if (resume) put(draft, "runs", run.id, { resume });
   return run.id as number;
@@ -196,7 +225,7 @@ function recordEvent(
   draft: Draft,
   source: string,
   event: Row,
-  routed: string[],
+  matched: string[],
   paused: string[] = [],
   sent = false,
 ): number {
@@ -213,7 +242,12 @@ function recordEvent(
     detail: event.detail ?? "",
     link: event.link ?? "",
     hops: event.hops ?? 0,
-    routed: JSON.stringify(routed),
+    actor: event.actor ?? "",
+    // What the rules matched. `routed` is what was actually dispatched, and is filled in as work is queued.
+    matched: JSON.stringify(matched),
+    routed: "[]",
+    // Kept as an alias of `routed` for facts written before `matched` existed; `routingOf` reads it as a fallback.
+    dispatched: "[]",
     // Only where a pause held it back, so the owner's list of what was skipped reads an index of those alone.
     ...(paused.length && { paused: JSON.stringify(paused) }),
     // Through the source's own door: only these are its to read back (`eventOutcome`), not what the hub made in its name.
@@ -222,7 +256,10 @@ function recordEvent(
   }).id;
 }
 
-function ingest(draft: Draft, source: string, given: unknown, sent = false) {
+/** Whether an event came from outside. A rule's own emits are authorized by that rule, not by the source's policy. */
+type Origin = "external" | "rule";
+
+function ingest(draft: Draft, source: string, given: unknown, sent = false, origin: Origin = "external") {
   const event = parseEvent(given);
   const existing = rows(draft.view, "events", { source, key: event.id })[0];
   if (existing) {
@@ -235,7 +272,26 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false) {
   // A paused rule doesn't take the event, and nothing is kept back for it: the event is recorded as skipped for it.
   const isPaused = (rule: Rule) => !!pauseOf(draft.view, rule, draft.now);
   const paused = matched.filter(isPaused).map((rule) => rule.name);
-  const taking = matched.filter((rule) => !isPaused(rule));
+  // With a policy, the gate decides before a rule is queued: a refused event is still recorded, so it can be looked at.
+  const sourcePolicy = draft.rules.sources[source]?.policy;
+  const verdicts = new Map(
+    matched.map(
+      (rule) =>
+        [
+          rule.name,
+          origin === "rule" && draft.rules.policy
+            ? ({ state: "accept", strength: "explicit", reason: "rule_emits" } as const)
+            : admit(draft.rules.policy, sourcePolicy, { id: rule.to, name: draft.rules.agents[rule.to].name }, event),
+        ] as const,
+    ),
+  );
+  const admitted = matched.filter((rule) => verdicts.get(rule.name)!.state === "accept");
+  const refused = matched.filter((rule) => verdicts.get(rule.name)!.state === "ignore").map((rule) => rule.name);
+  // With `assess`, a gate-accepted event is not dispatched yet: an assessor round decides first, in its own run. An event
+  // a rule emits is already authorized by that rule's `emits`, so it is not put through the source's policy again.
+  const assessing = draft.rules.policy?.accept === "assess" && origin !== "rule";
+  const taking = admitted.filter((rule) => !isPaused(rule) && !assessing);
+  const toAssess = admitted.filter((rule) => !isPaused(rule) && assessing);
   const id = recordEvent(
     draft,
     source,
@@ -244,12 +300,239 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false) {
     paused,
     sent,
   );
+  for (const rule of matched) recordDecision(draft, id, source, event, rule, verdicts.get(rule.name)!);
+  // What a source's own door reads back: the rules that took it, and the ones a policy refused.
+  if (refused.length) put(draft, "events", id, { refused: JSON.stringify(refused) });
   if (tooDeep) {
     const words = `同一条处理链已超过 ${MAX_HOPS} 层，后续事件已记录，没有继续派发。`;
     notify(draft, `hops:${source}:${event.id}`, "事件循环已停止", words, { once: true });
   }
-  for (const rule of taking) enqueue(draft, rule, id, rule.parallel ? event.subject : "");
-  return { event: id, duplicate: false, routed: taking.map((rule) => rule.name), paused };
+  const dispatched: string[] = [];
+  for (const rule of taking) {
+    // A speculative rule tries in the background first: nothing is delivered unless the round found something worth it.
+    const run = enqueue(draft, rule, id, rule.parallel ? event.subject : "", null, false, !!rule.speculate);
+    if (run === null) continue;
+    // A speculative try is not the rule's work yet: it takes no mandate, is not dispatched, and starts no fan-out. The
+    // real round it may hand over to does all three when the try comes back.
+    if (rule.speculate) continue;
+    dispatched.push(rule.name);
+    dispatch(draft, id, rule, verdicts.get(rule.name)!, undefined, false);
+  }
+  for (const rule of toAssess) enqueueAssessment(draft, id, source, event, rule);
+  // Only an event a rule took may become context: a refused event stays out of every live matter too.
+  if (draft.rules.policy?.fanout && event.subject && dispatched.length)
+    fanOut(draft, id, event, new Set(matched.map((rule) => rule.name)));
+  return {
+    event: id,
+    duplicate: false,
+    routed: dispatched,
+    paused,
+    ...(refused.length && { refused }),
+  };
+}
+
+/** One decision per event and rule: what the gate said, and why, whether or not it started work. */
+function recordDecision(
+  draft: Draft,
+  eventId: number,
+  source: string,
+  event: Row,
+  rule: Rule,
+  admission: ReturnType<typeof admit>,
+) {
+  add(draft, "decisions", {
+    event_id: eventId,
+    rule: rule.name,
+    source,
+    actor: event.actor ?? "",
+    state: admission.state,
+    reason: admission.reason,
+    ...(admission.state === "accept" && { strength: admission.strength }),
+    rules_version: draft.view.get("config", "rules")!.version,
+    decided_at: draft.at,
+  });
+}
+
+/** What an accepted event grants: immutable, and only the rules it matched under this rules version. */
+function recordMandate(
+  draft: Draft,
+  eventId: number,
+  rule: Rule,
+  admission: ReturnType<typeof admit>,
+  scope = rule.group,
+) {
+  if (admission.state !== "accept") return;
+  put(draft, "mandates", `${eventId}:${rule.name}`, {
+    event_id: eventId,
+    rule: rule.name,
+    strength: admission.strength,
+    reason: admission.reason,
+    scope,
+    rules_version: draft.view.get("config", "rules")!.version,
+    granted_at: draft.at,
+  });
+}
+
+/** A round of the assessor Agent: it reads the event and answers with a verdict, and nothing is dispatched until it does. */
+function enqueueAssessment(draft: Draft, eventId: number, source: string, event: Row, rule: Rule) {
+  const assessor = draft.rules.policy?.assessor!;
+  const lane = rule.parallel ? event.subject : "";
+  const run =
+    rows(draft.view, "runs", { rule: rule.name, lane, state: "queued", kind: "assess" })[0] ??
+    add(draft, "runs", {
+      rule: rule.name,
+      agent: assessor,
+      grp: rule.group,
+      lane,
+      state: "queued",
+      kind: "assess",
+      not_before: draft.at,
+      created_at: draft.at,
+      rules_version: draft.view.get("config", "rules")!.version,
+    });
+  put(draft, "run_events", `${run.id}:${eventId}`, { run_id: run.id, event_id: eventId });
+  return run.id;
+}
+
+/**
+ * The events this assessment is allowed to settle. Fan-out adds other rules' events to a live matter as context, and
+ * that context must not become authority for the rule being assessed.
+ */
+function assessedEventsOf(draft: Draft, run: Row): Row[] {
+  return rows(draft.view, "run_events", { run_id: run.id })
+    .filter((link) => !link.context)
+    .map((link) => draft.view.get("events", link.event_id)!)
+    .sort((a, b) => a.id - b.id);
+}
+
+/** The rules an event has actually dispatched: what a source reads back, not every rule it matched. */
+function dispatchedOf(event: Row): string[] {
+  return JSON.parse(event.dispatched ?? "null") ?? JSON.parse(event.routed ?? "[]");
+}
+
+function markDispatched(draft: Draft, eventId: number, rule: string) {
+  const event = draft.view.get("events", eventId)!;
+  const dispatched = dispatchedOf(event);
+  if (!dispatched.includes(rule))
+    put(draft, "events", eventId, {
+      routed: JSON.stringify([...dispatched, rule]),
+      dispatched: JSON.stringify([...dispatched, rule]),
+    });
+}
+
+/** An internal event (timer, schedule, answer, replay, manual run) has no gate round of its own: dispatch records the accept. */
+function ensureDecision(
+  draft: Draft,
+  eventId: number,
+  rule: Rule,
+  admission: ReturnType<typeof admit>,
+  scope?: string,
+) {
+  // A refusal may already be on record, for example while the rule was paused. Dispatching is itself the acceptance, so
+  // the audit trail must hold an accept as well; an earlier accept is the one to keep.
+  if (
+    rows(draft.view, "decisions", { event_id: eventId, rule: rule.name }).some(
+      (decision) => decision.state === "accept",
+    )
+  )
+    return;
+  const event = draft.view.get("events", eventId)!;
+  add(draft, "decisions", {
+    event_id: eventId,
+    rule: rule.name,
+    source: event.source,
+    actor: event.actor ?? "",
+    state: admission.state,
+    reason: admission.reason,
+    ...(admission.state === "accept" && { strength: admission.strength, scope: scope ?? rule.group }),
+    rules_version: draft.view.get("config", "rules")!.version,
+    decided_at: draft.at,
+  });
+}
+
+/** A real round now holds the event: this is the one place dispatch, its mandate, and fan-out are recorded. */
+function dispatch(
+  draft: Draft,
+  eventId: number,
+  rule: Rule,
+  admission: ReturnType<typeof admit>,
+  scope?: string,
+  fanout = true,
+) {
+  ensureDecision(draft, eventId, rule, admission, scope);
+  markDispatched(draft, eventId, rule.name);
+  recordMandate(draft, eventId, rule, admission, scope);
+  if (!fanout) return;
+  const event = draft.view.get("events", eventId)!;
+  if (draft.rules.policy?.fanout && event.subject)
+    fanOut(draft, eventId, event, new Set(JSON.parse(event.matched ?? "[]")));
+}
+
+/** What an assessor round decided about each event it read: the only thing that makes its rule take the event. */
+function applyVerdict(draft: Draft, run: Row, verdict: NonNullable<Result["verdict"]>) {
+  const rule = ruleNamed(draft, run.rule);
+  if (!rule) return;
+  for (const event of assessedEventsOf(draft, run)) {
+    const eventId = event.id;
+    if (verdict.decision === "accept") {
+      const strength = verdict.strength ?? "inferred";
+      add(draft, "decisions", {
+        event_id: eventId,
+        rule: rule.name,
+        source: event.source,
+        actor: event.actor ?? "",
+        state: "accept",
+        reason: verdict.reason ?? "assessed",
+        strength,
+        scope: verdict.scope ?? rule.group,
+        rules_version: draft.view.get("config", "rules")!.version,
+        decided_at: draft.at,
+      });
+      const queued = enqueue(draft, rule, eventId, rule.parallel ? event.subject : "", null, false, !!rule.speculate);
+      // A matter waiting on a person takes no new work: the decision stands, but nothing is granted for it.
+      if (queued === null) continue;
+      // A speculative rule rehearses first: the try delivers the real round, and only that round is dispatched.
+      if (rule.speculate) continue;
+      dispatch(
+        draft,
+        eventId,
+        rule,
+        { state: "accept", strength, reason: verdict.reason ?? "assessed" },
+        verdict.scope,
+      );
+    } else {
+      add(draft, "decisions", {
+        event_id: eventId,
+        rule: rule.name,
+        source: event.source,
+        actor: event.actor ?? "",
+        state: verdict.decision,
+        reason: verdict.reason ?? verdict.decision,
+        rules_version: draft.view.get("config", "rules")!.version,
+        decided_at: draft.at,
+      });
+      const refused = JSON.parse(draft.view.get("events", eventId)!.refused ?? "[]") as string[];
+      put(draft, "events", eventId, { refused: JSON.stringify([...new Set([...refused, rule.name])]) });
+    }
+  }
+}
+
+/**
+ * Subscription fan-out: an event also reaches the live matters of other rules on the same subject, as context only. It
+ * grants nothing and takes no gate: those matters already exist, and their rules were already authorized.
+ */
+function fanOut(draft: Draft, eventId: number, event: Row, already: Set<string>) {
+  const subject = event.subject;
+  const live = rows(draft.view, "runs", { lane: subject, state: ["queued", "claimed"] });
+  for (const run of live) {
+    if (already.has(run.rule)) continue;
+    const rule = ruleNamed(draft, run.rule);
+    if (!rule) continue;
+    const known = rows(draft.view, "run_events", { run_id: run.id, event_id: eventId });
+    if (known.length) continue;
+    // Context, not a matching event of this rule: it is read, but never becomes authority for its work.
+    put(draft, "run_events", `${run.id}:${eventId}`, { run_id: run.id, event_id: eventId, context: 1 });
+  }
 }
 
 function heldRun(draft: Draft, id: number, token: string, states: string[]) {
@@ -310,30 +593,38 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   const claimable = (run: Row) => {
     if (run.state !== "queued") return false;
     const rule = ruleNamed(draft, run.rule);
+    // An ordinary round queued before a rules change still belongs to the rule's current agent; a kinded round belongs to
+    // the agent it was queued for.
+    const agent = run.kind ? run.agent : rule?.to;
     // What was queued before a pause, or an answer that came in during one, waits for the resume.
-    if (!rule || !agents.includes(rule.to) || pauseOf(draft.view, rule, draft.now)) return false;
-    const agentLimit = draft.rules.agents[rule.to].maxActive;
+    if (!rule || !agent || !agents.includes(agent) || pauseOf(draft.view, rule, draft.now)) return false;
+    const agentLimit = draft.rules.agents[agent]?.maxActive;
     return (
       Date.parse(run.not_before) <= draft.now &&
       !claimed.some((other) => other.grp === run.grp && other.lane === run.lane) &&
       claimed.filter((other) => other.grp === run.grp).length < groupLimit(run.grp) &&
       (rule.maxActive === undefined || claimed.filter((other) => other.rule === run.rule).length < rule.maxActive) &&
-      (agentLimit === undefined || claimed.filter((other) => other.agent === rule.to).length < agentLimit)
+      (agentLimit === undefined || claimed.filter((other) => other.agent === agent).length < agentLimit)
     );
   };
   // The same claim again means the answer got lost: it gets back the run it already has.
   const held = claimed.find((run) => run.claim === claim && workerOf(draft.view, run) === worker);
   const run = held ?? runs.find(claimable);
   if (!run) return null;
+  let rules_version = held ? run.rules_version : draft.view.get("config", "rules")!.version;
   if (!held) {
-    assignQueued(draft, run);
-    settleSession(draft, draft.view.get("runs", run.id)!);
+    // A speculative or assessor round belongs to whoever it was queued for; only an ordinary round follows the rule's agent.
+    if (!run.kind) {
+      assignQueued(draft, run);
+      settleSession(draft, draft.view.get("runs", run.id)!);
+      // A run queued under old rules takes the configuration it is claimed under, as it always has.
+      rules_version = draft.view.get("config", "rules")!.version;
+    }
   }
   const since = held ? { claimed_at: run.claimed_at, link: run.link } : { claimed_at: draft.at, link: null };
-  const rules_version = held ? run.rules_version : draft.view.get("config", "rules")!.version;
   const claiming = { state: "claimed", claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
   put(draft, "runs", run.id, { ...claiming, ...nulls("last_issued", "last_result", "last_answer") });
-  return jobOf(draft.view, draft.view.get("runs", run.id)!, draft.env);
+  return jobOf(draft.view, draft.view.get("runs", run.id)!, draft.env, draft.now);
 }
 
 /** Ends a run nothing will pick up again, and says so. */
@@ -341,6 +632,8 @@ function stopRun(draft: Draft, run: Row, why: string, summary: string, words: st
   put(draft, "runs", run.id, { state: "cancelled", finished_at: draft.at, summary });
   closeStopped(draft, run.id, summary);
   notify(draft, `run:${run.id}:${why}`, run.rule, words, threadOf(run));
+  if (run.kind === "assess")
+    markAssessmentUnavailable(draft, run, why === "rule-gone" ? "rule_gone" : "assessment_stopped");
 }
 
 const ruleGone = (run: Row): [string, string] => [
@@ -370,16 +663,28 @@ function retryLater(draft: Draft, run: Row, result: Result) {
     // Runs queued for this thread stay apart: they came in since, and get their own count and their own go.
     const summary = `连续 ${MAX_ATTEMPTS} 次没跑成，不再自动重试`;
     const words = `连续 ${MAX_ATTEMPTS} 次自动处理没跑完（卡在：${error}），不再自动重试。解决后重新触发这件事，它会从头开始。`;
+    // The more specific terminal reason comes first: stopping then settles the same assessment and must not add another.
+    if (run.kind === "assess") markAssessmentUnavailable(draft, run, "assessment_failed");
     put(draft, "runs", id, failure);
     stopRun(draft, run, "stopped", summary, words);
     return rejected;
   }
   put(draft, "runs", id, { state: "queued", not_before: iso(notBefore), ...failure });
-  const waiting = rows(draft.view, "runs", { rule: run.rule, lane: run.lane, state: "queued" });
+  // Only a round of the same kind and agent can take over what came in meanwhile: an assessor's retry is not the work itself.
+  const waiting = rows(draft.view, "runs", { rule: run.rule, lane: run.lane, state: "queued" }).filter(
+    (other) => other.agent === run.agent && (other.kind ?? null) === (run.kind ?? null),
+  );
   for (const other of waiting.filter((other) => other.id !== id)) {
     for (const link of rows(draft.view, "run_events", { run_id: other.id })) {
-      put(draft, "run_events", `${id}:${link.event_id}`, { run_id: id, event_id: link.event_id });
+      // Context stays context: moving the link must not turn material into work this rule took.
+      put(draft, "run_events", `${id}:${link.event_id}`, {
+        run_id: id,
+        event_id: link.event_id,
+        ...(link.context && { context: link.context }),
+      });
       set(draft, "run_events", `${other.id}:${link.event_id}`, null);
+      // An assessor or speculative round was not the rule's work: merging its queue must not mark the event dispatched.
+      if (!run.kind && !link.context) markDispatched(draft, link.event_id, run.rule);
     }
     set(draft, "runs", other.id, null);
     if (other.resume) put(draft, "runs", id, { resume: other.resume });
@@ -390,7 +695,7 @@ function retryLater(draft: Draft, run: Row, result: Result) {
     const words = `连续 3 次自动处理没跑完（卡在：${error}），${time} 会自动再试。`;
     notify(draft, `run:${id}:failing`, run.rule, words, threadOf(run));
   }
-  assignQueued(draft, draft.view.get("runs", id)!);
+  if (!run.kind) assignQueued(draft, draft.view.get("runs", id)!);
   return rejected;
 }
 
@@ -414,16 +719,111 @@ function scheduleReview(draft: Draft, run: Row, later: Later) {
   add(draft, "timers", { ...fields, rule, lane, key: later.key, source, event_id: null, created_at: draft.at });
 }
 
-/** A receipt takes effect here, all of it in the one fact. */
+/**
+ * A speculative round's result: worth delivering becomes an ordinary round on the same events, so the real work and its
+ * receipt still run once. A round that found nothing ends quietly, without a card or a notice.
+ */
+function applySpeculation(draft: Draft, run: Row, result: Result): Rejected[] {
+  const id = run.id;
+  const rule = ruleNamed(draft, run.rule);
+  put(draft, "runs", id, {
+    state: result.outcome,
+    finished_at: draft.at,
+    summary: result.summary ?? "",
+    error: null,
+    cancel_at: null,
+  });
+  closeOpen(draft, (key) => key === `run:${id}:failing`, "后来跑成了");
+  closeOpen(draft, (key) => key === `run:${id}:unknown`, "结果回来了");
+  if (!rule) return [];
+  // Only a try that can be handed over is worth a real round: blocked, failed or dropped stays in the record only.
+  const worth = result.outcome === "done" && ["ready", "progress"].includes(result.report?.state ?? "");
+  if (!worth) return [];
+  // Context is material for the speculative try; it is not the work the real round was asked to take.
+  for (const event of takenEventsOf(draft.view, id)) {
+    const queued = enqueue(draft, rule, event.id, run.lane, null, false, false);
+    if (queued === null) continue;
+    // The latest accept is the one that matters: an assessor's verdict may have replaced the gate's first decision, and the
+    // try only proves it is worth acting on now.
+    const [decision] = rows(draft.view, "decisions", { event_id: event.id, rule: rule.name, state: "accept" }, 1, true);
+    dispatch(
+      draft,
+      event.id,
+      rule,
+      {
+        state: "accept",
+        strength: (decision?.strength as "explicit" | "inferred") ?? "explicit",
+        reason: (decision?.reason as string) ?? "source_key",
+      },
+      decision?.scope as string | undefined,
+    );
+  }
+  return [];
+}
+
+function applyAssessment(draft: Draft, run: Row, result: Result): Rejected[] {
+  const id = run.id;
+  put(draft, "runs", id, {
+    state: result.outcome,
+    finished_at: draft.at,
+    summary: result.summary ?? "",
+    error: null,
+    cancel_at: null,
+  });
+  closeOpen(draft, (key) => key === `run:${id}:failing`, "后来跑成了");
+  closeOpen(draft, (key) => key === `run:${id}:unknown`, "结果回来了");
+  // The verdict is about a rule that may have been removed while the assessor was reading.
+  if (!ruleNamed(draft, run.rule)) {
+    markAssessmentUnavailable(draft, run, "rule_gone");
+    return [];
+  }
+  if (!result.verdict) {
+    // Without a verdict the rule takes nothing: the event is left for a person to look at, not retried for ever.
+    markAssessmentUnavailable(draft, run, "no_verdict");
+    return [];
+  }
+  applyVerdict(draft, run, result.verdict);
+  return [];
+}
+
+/** An assessment that cannot decide leaves each event unavailable: recorded, refused for the rule, and never retried. */
+function markAssessmentUnavailable(draft: Draft, run: Row, reason: string) {
+  const ruleName = run.rule;
+  for (const event of assessedEventsOf(draft, run)) {
+    // One terminal verdict per event and rule: a retry's last failure and the stop that follows must not both settle it.
+    const existing = rows(draft.view, "decisions", { event_id: event.id, rule: ruleName });
+    if (existing.some((decision) => decision.state === "unavailable")) continue;
+    add(draft, "decisions", {
+      event_id: event.id,
+      rule: ruleName,
+      source: event.source,
+      actor: event.actor ?? "",
+      state: "unavailable",
+      reason,
+      rules_version: draft.view.get("config", "rules")!.version,
+      decided_at: draft.at,
+    });
+    const refused = JSON.parse(draft.view.get("events", event.id)!.refused ?? "[]") as string[];
+    put(draft, "events", event.id, { refused: JSON.stringify([...new Set([...refused, ruleName])]) });
+  }
+}
+
 function applyReceipt(draft: Draft, run: Row, result: Result) {
   const { id } = run;
   const rule = ruleNamed(draft, run.rule);
   const summary = result.summary ?? "";
   const rejected: Rejected[] = [];
-  put(draft, "runs", id, { state: result.outcome, finished_at: draft.at, summary, error: null, cancel_at: null });
+  put(draft, "runs", id, {
+    state: result.outcome,
+    finished_at: draft.at,
+    summary,
+    error: null,
+    cancel_at: null,
+    ...(result.report && { report: JSON.stringify(result.report) }),
+  });
   closeOpen(draft, (key) => key === `run:${id}:failing`, "后来跑成了");
   closeOpen(draft, (key) => key === `run:${id}:unknown`, "结果回来了");
-  const eventIds = eventsOf(draft.view, id).map((event) => event.id);
+  const eventIds = takenEventsOf(draft.view, id).map((event) => event.id);
   for (const card of rows(draft.view, "cards", { answer_event: eventIds, state: "decided" })) {
     put(draft, "cards", card.id, { state: "done", result: summary, closed_at: draft.at, version: card.version + 1 });
   }
@@ -442,7 +842,7 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   const emitted: number[] = [];
   for (const event of result.events ?? []) {
     if (rule?.emits && typeMatches(rule.emits.types, event.type)) {
-      const sent = ingest(draft, rule.emits.source, { ...event, hops: hopsOf(draft, run) + 1 });
+      const sent = ingest(draft, rule.emits.source, { ...event, hops: hopsOf(draft, run) + 1 }, false, "rule");
       // A number already taken is an earlier event's, perhaps another source's: what it says isn't what this receipt sent.
       if (!sent.duplicate) emitted.push(sent.event);
     } else rejected.push({ what: "events", reason: `规则「${run.rule}」没有写可以发 ${event.type}` });
@@ -477,7 +877,10 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
       cancel_at: null,
     });
     closeStopped(draft, id, "已停止");
+    if (run.kind === "assess") markAssessmentUnavailable(draft, run, "assessment_cancelled");
   } else if (result.outcome === "failed") rejected = retryLater(draft, run, result);
+  else if (run.kind === "assess") rejected = applyAssessment(draft, run, result);
+  else if (run.kind === "speculate") rejected = applySpeculation(draft, run, result);
   else rejected = applyReceipt(draft, run, result);
   put(draft, "runs", id, { last_answer: JSON.stringify(rejected) });
   return { rejected };
@@ -516,7 +919,11 @@ function answer(draft: Draft, id: number, given: Row) {
   const eventId = recordEvent(draft, card.source ?? SCHEDULE, event, rule ? [rule.name] : []);
   const decision = { choice: given.choice ?? null, answer: text, by: given.by ?? null, decided_at: draft.at };
   put(draft, "cards", id, { state: "decided", ...decision, answer_event: eventId, version: card.version + 1 });
-  if (rule) enqueue(draft, rule, eventId, card.lane, card.agent === rule.to ? card.session : null);
+  if (rule) {
+    const run = enqueue(draft, rule, eventId, card.lane, card.agent === rule.to ? card.session : null, true);
+    if (run !== null)
+      dispatch(draft, eventId, rule, { state: "accept", strength: "explicit", reason: "person" }, undefined, false);
+  }
   return { changed: true, state: "decided" };
 }
 
@@ -571,7 +978,9 @@ function tick(draft: Draft) {
     }
     const key = `${rule.name}@${slot}`;
     if (!rows(draft.view, "events", { source: SCHEDULE, key }).length) {
-      enqueue(draft, rule, recordEvent(draft, SCHEDULE, { id: key, type: "schedule.tick" }, [rule.name]), "");
+      const eventId = recordEvent(draft, SCHEDULE, { id: key, type: "schedule.tick" }, [rule.name]);
+      const run = enqueue(draft, rule, eventId, "");
+      if (run !== null) dispatch(draft, eventId, rule, { state: "accept", strength: "explicit", reason: "schedule" });
     }
     put(draft, "schedules", rule.name, { next_at: nextAt() });
   }
@@ -581,7 +990,10 @@ function tick(draft: Draft) {
     const event = { id: `timer:${timer.id}`, type: "timer.due", subject: timer.lane, hops: timer.hops ?? 0 };
     const eventId = recordEvent(draft, timer.source, event, rule ? [rule.name] : []);
     put(draft, "timers", timer.id, { event_id: eventId });
-    if (rule) enqueue(draft, rule, eventId, timer.lane, timer.agent === rule.to ? timer.session : null);
+    if (rule) {
+      const run = enqueue(draft, rule, eventId, timer.lane, timer.agent === rule.to ? timer.session : null);
+      if (run !== null) dispatch(draft, eventId, rule, { state: "accept", strength: "explicit", reason: "timer" });
+    }
   }
   sweep(draft);
 }
@@ -657,8 +1069,18 @@ const CONTROL = {
     const runs = new Set<number>();
     for (const id of [...events].sort((a, b) => a - b)) {
       const event = draft.view.get("events", id);
-      if (!event || !JSON.parse(event.paused ?? "[]").includes(name) || taken(id)) continue;
-      runs.add(enqueue(draft, rule, id, rule.parallel ? event.subject : ""));
+      // A pause is not a way around the gate: an event the policy refused stays refused.
+      if (
+        !event ||
+        !JSON.parse(event.paused ?? "[]").includes(name) ||
+        JSON.parse(event.refused ?? "[]").includes(name) ||
+        taken(id)
+      )
+        continue;
+      const run = enqueue(draft, rule, id, rule.parallel ? event.subject : "");
+      if (run === null) continue;
+      dispatch(draft, id, rule, { state: "accept", strength: "explicit", reason: "replay" });
+      runs.add(run);
       replayed.push(id);
     }
     return { events: replayed, runs: [...runs] };
@@ -681,7 +1103,9 @@ const CONTROL = {
       detail: reason,
     });
     const eventId = recordEvent(draft, source, event, [name]);
-    const run = enqueue(draft, rule, eventId, rule.parallel ? subject : "");
+    const run = enqueue(draft, rule, eventId, rule.parallel ? subject : "", null, true);
+    if (run === null) throw new Conflict(`规则「${name}」的事项在等本人处理，先回答它`);
+    dispatch(draft, eventId, rule, { state: "accept", strength: "explicit", reason: "manual" });
     // Waiting out a retry's backoff wouldn't be now: the owner asking is the go-ahead.
     put(draft, "runs", run, { manual: 1, not_before: draft.at });
     return { event: eventId, run };
@@ -761,6 +1185,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     if (run.state === "queued") {
       put(draft, "runs", id, { state: "cancelled", finished_at: draft.at });
       closeStopped(draft, id, "已停止");
+      if (run.kind === "assess") markAssessmentUnavailable(draft, run, "assessment_cancelled");
     } else if (run.state === "claimed") put(draft, "runs", id, { cancel_at: draft.at });
     else throw new InputError("这一轮已经结束了");
   },

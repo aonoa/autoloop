@@ -1,27 +1,13 @@
 import assert from "node:assert/strict";
 import { deadlines } from "../kernel/due.ts";
-import { snapshot, type Fact, type View, type Row } from "../kernel/evolve.ts";
+import { snapshot, TABLES, type Fact, type View, type Row } from "../kernel/evolve.ts";
 
 type Snapshot = ReturnType<typeof snapshot>;
 const rows = (view: Snapshot, table: keyof Snapshot["tables"]) => Object.values(view.tables[table]);
 // Independent replay oracle: it checks the indexed projection without using its write or query implementation.
 export function replay(log: Fact[]): Snapshot {
-  const tables = Object.fromEntries(
-    [
-      "events",
-      "runs",
-      "run_events",
-      "cards",
-      "deliveries",
-      "timers",
-      "schedules",
-      "seen",
-      "keys",
-      "config",
-      "due",
-      "pauses",
-    ].map((t) => [t, {}]),
-  ) as Snapshot["tables"];
+  // Every table the projection has, so adding one to evolve.ts can't leave the oracle replaying an older shape.
+  const tables = Object.fromEntries(TABLES.map((t) => [t, {}])) as Snapshot["tables"];
   const next: Record<string, number> = {};
   let seq = 0;
   for (const fact of log) {
@@ -56,12 +42,20 @@ export function invariants(current: View, log: Fact[], before?: Snapshot) {
       "超出同组并发数",
     );
   for (const e of events)
-    // A rule paused when the event came is on record as having matched it, and took nothing.
-    for (const rule of JSON.parse(e.routed).filter((r: string) => !JSON.parse(e.paused ?? "[]").includes(r)))
+    // Every dispatched rule still holds a run for the event; `matched` is what the rules matched, not what ran.
+    for (const rule of JSON.parse(e.dispatched ?? e.routed ?? "[]"))
       assert.ok(
         links.some((l) => l.event_id === e.id && view.tables.runs[l.run_id]?.rule === rule),
         "已收事件丢了派发关系",
       );
+  for (const mandate of rows(view, "mandates"))
+    assert.ok(
+      rows(view, "decisions").some(
+        (decision) =>
+          decision.event_id === mandate.event_id && decision.rule === mandate.rule && decision.state === "accept",
+      ),
+      "授权没有对应的 accept 决定",
+    );
   for (const card of cards)
     if (card.answer_event !== null) {
       const event = view.tables.events[card.answer_event];

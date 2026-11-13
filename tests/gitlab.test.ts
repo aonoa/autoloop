@@ -25,6 +25,7 @@ const mergeRequest = (action: string) =>
       description: "Fixes the login flow for mobile.",
     },
     project: { path_with_namespace: "org/proj", web_url: "https://gitlab.com/org/proj" },
+    user: { username: "alice" },
   });
 
 test("gitlab: a merge request event carries its action, subject and words", () => {
@@ -35,6 +36,21 @@ test("gitlab: a merge request event carries its action, subject and words", () =
   assert.equal(event.detail, "Fixes the login flow for mobile.");
   assert.equal(event.link, "https://gitlab.com/org/proj/merge_requests/42");
   assert.equal(event.id, "evt-12345");
+  assert.equal(event.actor, "alice");
+});
+
+test("gitlab: a username with prose becomes an empty actor", () => {
+  const [event] = gitlab({
+    headers: headers(),
+    body: JSON.stringify({
+      object_kind: "merge_request",
+      object_attributes: { iid: 1, action: "open", title: "x" },
+      project: { path_with_namespace: "org/proj" },
+      user: { username: "alice is here" },
+    }),
+    secret,
+  });
+  assert.equal(event.actor, "");
 });
 
 test("gitlab: a push has no number in its subject", () => {

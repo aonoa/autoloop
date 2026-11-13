@@ -64,8 +64,9 @@
       "command": ["agent", "-p", "--trust", "{prompt}"],
     },
   },
-  "channels": { "feishu": { "name": "飞书", "answerers": ["ou_xxx"] } },
+  "channels": { "feishu": { "name": "飞书", "answerers": ["ou_xxx"], "style": "im" } }, // style: im 短消息 / async 完整交付
   "defaultChannels": ["feishu"], // 可选：自己没写 channels 的卡片和通知（tell、中台自己的告警、别处定时任务的提问、没写 channels 的规则）只发到这几个通道，不写就发到所有通道
+  "policy": { "accept": "gate", "assessor": "claude", "fanout": false }, // 可选：谁可以发起工作。不写就是今天的行为；gate 走确定性授权，assess 再加一轮研判；fanout 让同一对象上的其他活事项收事件作资料
   "rules": [
     {
       "name": "处理告警",
@@ -78,6 +79,8 @@
       "group": "ops", // 同一组一次一轮，默认就是规则名
       "parallel": 3, // 写了就按对象分事项：同一对象一次一轮，这一组最多 3 轮，还受接单程序的 worker.capacity 限制（默认 2）
       "resume": true, // 同一事项的新事件接着上一轮的会话，默认每次开新会话
+      "speculate": true, // 后台先试一轮，找到值得交付的东西才交给正式一轮，默认关
+      "project": "app", // 可选：项目名，派生 group 和默认目录，方便按项目看
       "tell": "needed", // always 每轮做成都发（没事可做、没跑成不发）/ needed 只在有卡片时（默认）/ never 只压住回执里的通知，提问和中台自己的告警照发
       "emits": { "source": "shop", "types": ["pr.*"] }, // 回执里能发什么事件，不写就不能发
       "channels": ["feishu"], // 这条规则的卡片和通知只发到这几个通道，不写就照 defaultChannels
@@ -100,6 +103,39 @@
 }
 ```
 
+### Policy：谁可以让工作开始
+
+`policy` 不写，或写 `"accept": "off"`，就与原来的 autoloop 完全一样：来源密钥验证通过、规则命中，就派活。`accept` 缺省也是 `off`；只写 `policy.fanout` 只开启扇出，不会开启 gate。开启后只收窄，不扩大：
+
+| `policy.accept` | 行为 |
+| --- | --- |
+| `off`（默认） | 来源密钥即授权，规则命中即派活 |
+| `gate` | 先过确定性检查：来源策略里的 `allowlist`、`admission`、`bots`；通过才写授权并派活 |
+| `assess` | 过 gate 后再排一轮研判，由 `policy.assessor` 指定的 Agent 判断这件事该不该接；`accept` 才派活 |
+
+来源可以有自己的策略，身份只在本来源内比较，不同来源的账号不做映射：
+
+```jsonc
+"sources": {
+  "github": {
+    "name": "GitHub", "adapter": "github",
+    "policy": {
+      "allowlist": ["alice"],   // 空数组表示“来源自己放行的人都可以”，不是拒绝所有人
+      "admission": "named",     // named：事件要明确点名这个 Agent；any：不要求
+      "bots": ["dependabot"]    // 允许产生候选的机器人
+    }
+  }
+}
+```
+
+事件里的 `actor` 是“谁发起的”，由来源插件从平台自己的身份里取，只能是标识符字符；取不到或不合法就留空。开启 Policy 后，空 `actor` 会被记成 `no_actor` 拒绝。来源插件不认识 Policy，只负责把身份原样交上来。
+
+每一条「事件 × 规则」都会写一条决定，记下 `accept/stop/ignore/unavailable` 和原因；只有真正接下的才写授权，授权记下规则、强度、范围和当时的规则版本。外部事件在收到时由 gate 或研判写决定；回答、定时、计划、补跑和手动运行这类内部事件没有独立的门，由真正派发的 `dispatch` 保证至少有一条 `accept` 决定，原因分别是 `person/timer/schedule/replay/manual`。同一事件和规则已有 `accept` 时不重复写；先有拒绝、后来确实派发的，会再补一条 `accept`，保留完整的审计链。规则自己的 `emits` 发出的事件，由该规则的 `emits` 授权，不再过来源 Policy，也不再进研判；这不是外部来源能用的门。
+
+`policy.fanout: true` 让同一对象上其他已经在办的事项把这条事件当作资料读；资料不重走 Policy、不授予任何权限、不写授权，也不参与研判结算。默认关。本人的回答是原事项的私有输入，即使开启扇出也不扩散到其他事项；它仍会写决定和授权，并叫醒原来那条事项。
+
+规则写 `"speculate": true` 时，事件先排一轮后台预演：预演只读，回执 `report.state` 是 `ready` 或 `progress` 才把同一批事件交给正式轮，其他结果安静收尾。预演轮本身不算接下事件：它不写授权、不补 `routed`、不触发扇出；正式轮真正排进队列时才补。研判 `accept` 后也按同样规则处理：只有正式轮排进队列时才补授权、`routed` 和扇出。预演和研判轮都以 `access: "read"` 下发；`command` 插件不消费 `access`，这两类轮次只靠提示词约束，要硬隔离请用只读账号或容器。
+
 `cwd` 由接单电脑解释，可用 Unix 绝对路径、Windows 盘符或 UNC 路径、`~/` 或 `~\` 开头的家目录路径；中台与接单电脑可以用不同操作系统。接受 Windows 路径是兼容的能力扩展，原有 `/v1`、规则与插件用法不变。
 
 `elsewhere` 是在别处定时跑的任务：中台不启动它们，只在 `agent-autoloop status` 里列出来，它们要找你时用 `POST /v1/tell`。写了 `cwd`（还要写 `skill` 或 `prompt`）的也能问你：卡片带选项，你答了，中台像规则的一轮那样叫醒 `to`，在 `cwd` 照 `skill`、`prompt` 接着做，这一轮的组就是任务名，一次一轮，不接定时任务自己的会话。规则写错了，文件改动不生效，旧规则继续跑，并推一张卡片告诉你错在哪。可以给它写上 `model` 和 `effort`，也就是应用里给这个任务设的模型和推理强度：中台不用它们启动任何东西，只随 `GET /v1/state` 的 `elsewhere` 带出来，给显示这些任务的客户端用；没写就不带。这是兼容的扩展，原有规则文件不用改。
@@ -121,10 +157,12 @@
 ```
 POST /v1/events                    Authorization: Bearer <来源的密钥>
 { "id": "12:new", "type": "feedback.new", "subject": "#12", "summary": "…", "detail": "…", "link": "https://…" }
-→ 200 { "event": 34, "duplicate": false, "routed": ["处理意见"] }
+→ 200 { "event": 34, "duplicate": false, "routed": ["处理意见"], "paused": [], "refused": [] }
 ```
 
 - `id` 和 `type` 必填。同一来源同一 `id` 只记一次，所以来源尽管重发。
+- `routed` 只列真正接下、排进一轮的规则；被 Policy 拒掉的在 `refused`，因为暂停没接的在 `paused`。事件收到时先记下匹配（内部字段 `matched`）和决定，研判或预演完成、正式轮真正排进队列后再补 `routed`；`GET /v1/events/<编号>` 读的是同一份结果。`dispatched` 是 `routed` 的兼容别名，两者始终一致。
+- `policy.fanout` 只把**已经真正派给某条规则**的事件，作为同一对象上其他活事项的资料。资料链接不授予权限、不参与研判结算、不派正式轮，也不让那一轮去结别的来源的卡片。被拒或还在等研判的事件不会成为资料。
 - `subject` 只能是标识符（字母、数字和 `# . _ : / @ -`），`link` 只能是纯 ASCII 网址，因为它们会进提示词。`summary`、`detail` 不进提示词。
 - 没有规则匹配的事件也留着，`agent-autoloop status` 看得到。
 - 字段上限：`id` 200 个字、`subject` 100、`summary` 200、`detail` 4000、`link` 500，`type` 64 个字符。
@@ -203,7 +241,7 @@ GET /v1/work?claim=<这次领活的编号>&wait=50&running=7,8&capacity=1    Aut
     "answers": [{ "card", "title", "options", "choice", "chosen", "text", "about", "by", "at" }],  // 这一轮要接着做的决定；choice 是从 0 起的下标，chosen 是所选那项的文字，自由文字回答时就是那句回答
     "timers":  [{ "key", "about", "at" }],                                               // 这一轮到期的复查
     "waiting": [{ "key", "about", "at" }],                                               // 这个事项还没到期的复查
-    "open":    [{ "card", "title", "text", "at" }],                                      // 同来源同组还没收尾的卡片
+    "open":    [{ "card", "title", "text", "at" }],                                      // 同来源同组还没收尾的卡片；资料事件不扩大可结范围
     "decided": [{ "card", "title", "choice", "at" }]                                     // 这个事项定过的事，只对当时那件事有效；choice 已是所选那项的文字，不是下标
   }
 }
@@ -226,7 +264,9 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
   "notice":  [{ "title", "text", "key", "fyi": true }],
   "resolve": [{ "card": 3, "reason": "在哪核实了已解决" }],
   "later":   [{ "key": "…", "at": "2026-11-05T09:00:00+08:00", "about": "到时候查什么" }, { "key": "…", "cancel": true }],
-  "events":  [{ "id", "type", "subject", "summary", "detail", "link" }]
+  "events":  [{ "id", "type", "subject", "summary", "detail", "link" }],
+  "report":  { "state": "progress" | "waiting" | "ready" | "blocked" | "failed" | "dropped", "note": "一句话" },
+  "verdict": { "decision": "accept" | "stop" | "ignore" | "unavailable", "reason": "为什么", "strength": "explicit" | "inferred", "scope": "做到哪一步" }
 }
 ```
 
@@ -240,6 +280,8 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 - `resolve` 只能结同来源、同组、这一轮领活前就有的卡片，越界的写进 `rejected`，不影响这一轮的结果。
 - `later` 的 `key` 范围是这个事项，同一个 `key` 再写一次就是改时间。
 - `events` 的来源由规则的 `emits` 决定，回执改不了。
+- `report` 是这一轮的结构化状态（`progress`/`waiting`/`ready`/`blocked`/`failed`/`dropped`），用来算事项阶段；`verdict` 只由研判轮填写。两者都可以不写。
+- 研判轮不做事，只读事件并交 `verdict`。`accept` 才写决定和授权并排真正的活；`stop`/`ignore`/`unavailable` 只留下决定。研判的 `reason` 与 `scope` 会写进决定；预演交付后补授权时也沿用这两项，不会退回 gate 的第一条决定。研判轮没写 `verdict`、被取消，或连续失败到不再重试，事件记为 `unavailable`，对应规则记为 `refused`，不会永远挂着；同一条事件和规则只留一条 `unavailable`。规则在研判排队时被删掉，也按这一条结算。
 
 ### Agent 只需要做一件事
 
@@ -249,7 +291,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 第一行一句话结论。可自动重试的临时失败写「没跑成：原因」，需要本人恢复的阻塞写「待你处理：原因」并交 ask，没事可做写「没事可做：原因」。其余结束本轮，事项由回执继续跟进。
 
 ```agent-autoloop
-{ "ask": [ … ], "notice": [ … ], "resolve": [ … ], "later": [ … ], "events": [ … ] }
+{ "ask": [ … ], "notice": [ … ], "resolve": [ … ], "later": [ … ], "events": [ … ], "report": { … } }
 ```
 ````
 
@@ -308,7 +350,7 @@ GET /v1/cards/next?wait=50    Authorization: Bearer <通道的密钥>
 
 ```
 GET  /v1/state              Authorization: Bearer <本人的密钥>
-→ 200 { "seq", "totals", "cards", "recentCards", "agents", "channels", "sources", "lines", "pauses", "skipped", "elsewhere", "runs", "nextBefore", "hasMore", "unrouted", "spending", "timers", "now", "timezone" }
+→ 200 { "seq", "totals", "cards", "recentCards", "agents", "channels", "sources", "lines", "pauses", "skipped", "elsewhere", "runs", "matters", "decisions", "mandates", "nextBefore", "hasMore", "unrouted", "spending", "timers", "now", "timezone" }
 
 POST /v1/cards/56/answer    { "choice": 1 } 或 { "text": "别的想法" }
 POST /v1/cards/56/resolve   { "reason": "不用决定了，因为……" }
@@ -316,6 +358,22 @@ POST /v1/runs/12/cancel     {}
 ```
 
 `agent-autoloop status`、`answer`、`resolve`、`stop` 就是这几个请求。
+
+`matters` 是还在办的事项及其阶段，新的在前。已结束、只剩等待报告且没有排队轮次、没有未结卡片、没有未来复查的事项不列出来。阶段按下面的表自上而下先匹配先得：
+
+| 阶段 | 含义 |
+| --- | --- |
+| `person/delivery` | 卡片发送失败，正在重试；输入还没送到人手里 |
+| `person/answer` | 有未回答的提问 |
+| `person/review` | 最近一轮报告 `ready`，等人审阅 |
+| `person/blocked` / `person/failed` | 最近一轮报告受阻/失败，此后本人没有回答或结案 |
+| `working/queued` | 有排队的轮次，或还没开始过 |
+| `working` | 正在执行、结果暂时不明，或最近一轮报告 `progress`（还在做，稍后会再交结果） |
+| `idle` | 这一轮结束了，没有别的在办动作 |
+
+受阻/失败后，定时、复查和自动事件都不会再派新活；本人回答卡片、结案，或手动运行后才会接着走。`decisions` 是最近的决定，`mandates` 是有效授权，都只读；它们是全局最近的记录，不随 `?before=` 翻轮次而清空。
+
+命令行 `agent-autoloop board [--json]` 汇总这些阶段和最近决定/授权；`decisions [--json]`、`mandates [--json]` 分别细看。它们都读 `/v1/state`，不是另一套状态。
 
 整份状态在同一个快照里读出，`seq` 是那时的日志序号：自己做看板的，先取状态，再从 `GET /v1/stream?after=<seq>` 接着读，不漏也不重。`cards`、`recentCards` 在这里多带两项：`lane` 是卡片所在的事项（写了 `parallel` 的规则是事件的对象，别的规则是空字符串），`about` 是提问时留给接着干的那一轮的说明。通道和卡片页拿不到这两项。旧客户端忽略这些字段即可。
 
@@ -349,9 +407,9 @@ POST /v1/rules/巡检/run        { "subject": "#12", "reason": "看一眼" }    
 - **事件规则**：事件照常记下，但这条规则不接、不派活，也不排队等恢复；恢复后不自动补接。事件的 `paused` 记着因为暂停没接它的规则，`/v1/events` 的应答多一个 `paused` 列表，`routed` 只列真正接了的规则。最近 20 条这样的事件在 `/v1/state` 的 `skipped` 里。这类事件不算“没有规则接的事件”。同一事件匹配的其他规则照常接。不自动补接是因为暂停常常是因为下游坏了或者要止损，事后一次性涌进来的活比漏掉的更难收拾；要不要补由本人看过再定，见下面的补跑。
 - **已经排队的、等重试的、暂停期间收到回答或到期复查的这一轮**：留在队列里不派出去，恢复后照常领取，不丢回答。已经在跑的这一轮不受影响，要停用 `stop`。
 
-`paused.skipped` 是这次暂停开始（`since`）后这条规则跳过、还没补跑的事件：`count` 是总条数，`events` 是其中最近 20 条，新的在前，每条和 `/v1/state` 的 `skipped` 一样带 `id`、`source`、`type`、`subject`、`summary`、`receivedAt` 和收到时因为暂停没接它的规则 `rules`（事件收到时记下的，哪条规则补跑过也照样列着）。条数多于 20 时只列 20 条，看 `count` 就知道还有多少。定时规则暂停时不记事件，`skipped` 是 `null`。暂停的应答里是到这时为止跳过的；恢复的应答多了 `paused`，就是刚解除的那次暂停，`skipped` 在解除之后读，这次暂停跳过的都在里面，之后不会再多。
+`paused.skipped` 是这次暂停开始（`since`）后这条规则跳过、还没补跑、也不是被 Policy 拒绝的事件：`count` 是总条数，`events` 是其中最近 20 条，新的在前，每条和 `/v1/state` 的 `skipped` 一样带 `id`、`source`、`type`、`subject`、`summary`、`receivedAt` 和收到时因为暂停没接它的规则 `rules`（事件收到时记下的，哪条规则补跑过也照样列着）。被 Policy 拒绝的事件留在 `refused` 和决定里，不会列成可补跑的待办。条数多于 20 时只列 20 条，看 `count` 就知道还有多少。定时规则暂停时不记事件，`skipped` 是 `null`。暂停的应答里是到这时为止跳过的；恢复的应答多了 `paused`，就是刚解除的那次暂停，`skipped` 在解除之后读，这次暂停跳过的都在里面，之后不会再多。
 
-补跑把这些事件原样交给这条规则，和事件当时就被接下一样：同一事项有排队的一轮就并进去，写了 `parallel` 的按事件的 `subject` 分事项，Agent 拿到的是原来的来源、类型、对象、摘要、详情和链接。`since` 必填，要带时区，补的是这条规则从这个时间起暂停时跳过、还没补跑的全部事件，恢复应答里的 `paused.since` 就是这次暂停的。事件本身不改，`paused`、`routed` 照旧记着收到时谁接了、谁因为暂停没接；补跑只是把它接到这条规则的一轮上，`GET /v1/events/<编号>` 的 `runs` 里多了这一轮，`why` 的时间线多一行“本人补跑暂停时跳过的事件”；并进的是早就排着的一轮（在等重试、同组满了、接单程序离线）时，那一轮的 `why` 里不显示这条事件和这一行。接到过这条规则某一轮的事件就不再算欠着，所以同一条只补一次，再补跑同一段返回空列表，`paused.skipped` 也不再数它；顶层 `skipped` 记的是收到时的情况，补过的照样在里面。同一事件还被别的规则的暂停跳过时，那条规则仍欠着它，恢复后可以各自补。**暂停中的规则不能补跑**，返回 409 `规则「…」暂停中，先恢复再补跑`；定时规则返回 400。写了 `until` 的暂停到点自动恢复时没人看应答：命令行在暂停时就给出补跑命令，暂停期间 `status` 也列着条数和这条命令。
+补跑把这些事件原样交给这条规则，和事件当时就被接下一样：同一事项有排队的一轮就并进去，写了 `parallel` 的按事件的 `subject` 分事项，Agent 拿到的是原来的来源、类型、对象、摘要、详情和链接。`since` 必填，要带时区，补的是这条规则从这个时间起暂停时跳过、还没补跑的全部事件，恢复应答里的 `paused.since` 就是这次暂停的。补跑只补暂停跳过的，不越过 Policy：当时被 Policy 拒绝的事件即使同时也被暂停跳过，也不会因为补跑而接下，仍留在 `refused` 里。事件本身不改，`paused`、`routed` 照旧记着收到时谁接了、谁因为暂停没接；补跑只是把它接到这条规则的一轮上，`GET /v1/events/<编号>` 的 `runs` 里多了这一轮，`why` 的时间线多一行“本人补跑暂停时跳过的事件”；并进的是早就排着的一轮（在等重试、同组满了、接单程序离线）时，那一轮的 `why` 里不显示这条事件和这一行。接到过这条规则某一轮的事件就不再算欠着，所以同一条只补一次，再补跑同一段返回空列表，`paused.skipped` 也不再数它；顶层 `skipped` 记的是收到时的情况，补过的照样在里面。同一事件还被别的规则的暂停跳过时，那条规则仍欠着它，恢复后可以各自补。**暂停中的规则不能补跑**，返回 409 `规则「…」暂停中，先恢复再补跑`；定时规则返回 400。写了 `until` 的暂停到点自动恢复时没人看应答：命令行在暂停时就给出补跑命令，暂停期间 `status` 也列着条数和这条命令。
 
 立即运行走正常派活：记一条 `run.manual` 事件（定时规则的来源是 `schedule`，事件规则用它的 `when.source`），`summary` 是“<密钥名> 手动运行”，`detail` 是 `reason`；`subject` 决定 `parallel` 规则的事项。同一事项已经有排队的一轮时并进那一轮，并取消它的重试等待。这一轮的 `runs[].manual` 为 true。**暂停中的规则不能立即运行**，返回 409 `规则「…」暂停中，先恢复再手动运行`：暂停的意思是这条规则一件活都不派，手动运行也不例外，这样“暂停了就不会再花钱、不会再对外动作”这一条没有例外。要试跑就先恢复再运行。
 
@@ -447,7 +505,7 @@ Node 请求转换层只把 Node 的请求变成 Request；文件、SQLite 连接
 
 `use: "acp"` 配合 `command: ["某个 ACP 程序", "启动参数"]` 使用 stdio ACP v1，ACP Agent 必须写 `command`，没写时这一轮算没跑成，原因里写着缺什么。桥接先初始化，再新建或接着旧会话：Agent 声明了 `loadSession` 就用 `session/load`，只声明 `sessionCapabilities.resume` 就用 `session/resume`。加载时重放的历史不算这一轮的回复，思考和工具输出不进回执。提示词发出去就算这一轮开始了，之后再断就留在原会话重派。接着旧会话时上一次可能已经干了一半，只有 Agent 明确拒绝这个会话（回了错误，或两种恢复都不支持）才开新会话；程序起不来、初始化出错、加载中途断了都留在原会话重派。会话正被别的程序打开（错误的 `data.reason` 是 `thread_active_writer`）也不算拒绝：这一轮算没跑成，原因是 Agent 自己的话，留在原会话过一会儿重派，连续第 3 次的卡片会带上这句话，告诉你要关掉什么。其他错误都算拒绝，不看错误码：官方 Codex 适配器对真不存在的会话回的是 -32603。只有 `end_turn` 且有最后一条文字消息才算完成：有 `messageId` 就按它分消息，没有时思考、工具调用和做完或失败的工具更新都算分界。一轮没完成时桥接马上交代原因，Agent 过 30 秒还不走就连同进程组一起停掉。消息只按换行分帧，读不懂的行算这一轮没跑成。会话编号交给中台保存。没有声明文件读写、终端或交互登录能力，Agent 用自己的工具；需要登录时先用它自己的命令行登录。
 
-权限只选一次性的选项：`read` 允许结构化的读和搜索，`edit` 再允许工作目录内的编辑（核对符号链接，经过找不到目标的链接算在目录外），`full` 允许其他操作。权限请求只带工具调用编号时，按这次调用之前说过的种类和路径判断，请求自己带的字段优先。未提供相应选项就取消。权限依赖 Agent 遵守 ACP，不提供额外的系统隔离；规范允许 Agent 不询问就执行，这种操作 `access` 拦不住，要用 Agent 自己的模式限制。官方 Codex 适配器给的拒绝选项（`reject_once`）只有 `cancel`，选了它整轮以 `stopReason: cancelled` 结束，算没跑成，由中台重派；`read`、`edit` 档下要跑命令的请求就是这样回来的，所以 Agent 非跑命令不可时，给 `full` 或用它自己的模式。`model`、`effort`、`tier` 不生效。核对依据：[初始化](https://agentclientprotocol.com/protocol/v1/initialization)、[会话](https://agentclientprotocol.com/protocol/v1/session-setup)、[工具权限](https://agentclientprotocol.com/protocol/v1/tool-calls)。
+权限只选一次性的选项：`read` 允许结构化的读和搜索，`edit` 再允许工作目录内的编辑（核对符号链接，经过找不到目标的链接算在目录外），`full` 允许其他操作。权限请求只带工具调用编号时，按这次调用之前说过的种类和路径判断，请求自己带的字段优先。未提供相应选项就取消。权限依赖 Agent 遵守 ACP，不提供额外的系统隔离；规范允许 Agent 不询问就执行，这种操作 `access` 拦不住，要用 Agent 自己的模式限制。研判轮和预演轮一律以 `read` 下发，不管规则里的 Agent 写的是哪一档；`command` 插件不消费 `access`，这两类轮次只靠提示词约束，要真正隔离请用只读账号或容器。官方 Codex 适配器给的拒绝选项（`reject_once`）只有 `cancel`，选了它整轮以 `stopReason: cancelled` 结束，算没跑成，由中台重派；`read`、`edit` 档下要跑命令的请求就是这样回来的，所以 Agent 非跑命令不可时，给 `full` 或用它自己的模式。`model`、`effort`、`tier` 不生效。核对依据：[初始化](https://agentclientprotocol.com/protocol/v1/initialization)、[会话](https://agentclientprotocol.com/protocol/v1/session-setup)、[工具权限](https://agentclientprotocol.com/protocol/v1/tool-calls)。
 
 `agent-autoloop mcp` 提供 stdio MCP，固定支持 [2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle) 版，不支持 2026-07-28 的无握手协议。工具为 `status`、`why`、`answer`、`resolve`、`stop`、`emit`、`tell`、`pause`、`resume`、`replay`、`run`；`status` 可带 `before` 往前翻轮次；按本机已有的本人或来源密钥展示工具，`pause`、`resume`、`replay`、`run` 和命令行同名命令一样要本人密钥。它调用同样的 HTTP 接口，不直接改数据库；密钥留在本机 `config.json`。MCP 客户端把程序设为 `node`，参数设为引擎的绝对路径 `bin/agent-autoloop.ts` 和 `mcp`，环境里指定 `AGENT_AUTOLOOP_HOME`。标准输出只写 JSON-RPC。消息只按换行分帧；每个工具调用各自回复，慢调用不挡 `ping`。它不区分调用方，都按本人记录（`answer` 记成本人，`emit` 不带层数），不要配进接单程序启动的 CLI 的用户级配置，否则一轮能自己回答自己的卡片。
 

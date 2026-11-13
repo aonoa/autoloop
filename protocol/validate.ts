@@ -22,12 +22,24 @@ export function addUsage(total: Usage | undefined, more: Usage | undefined): Usa
     if (more[field] !== undefined) result[field] = (result[field] ?? 0) + more[field];
   return result;
 }
+/** What a round says became of its work, in words a person's board reads: a stage, not a claim of success. */
+export type Report = { state: "progress" | "waiting" | "ready" | "blocked" | "failed" | "dropped"; note?: string };
+/** An assessor round's verdict on whether an event starts new work. Only an accepted one makes a ticket. */
+export type Verdict = {
+  decision: "accept" | "stop" | "ignore" | "unavailable";
+  reason?: string;
+  strength?: "explicit" | "inferred";
+  scope?: string;
+};
+
 export type Result = {
   outcome: "done" | "nothing" | "failed" | "cancelled";
   summary?: string;
   error?: string;
   session?: string;
   usage?: Usage;
+  report?: Report;
+  verdict?: Verdict;
   ask?: Ask[];
   notice?: Notice[];
   resolve?: { card: number; reason: string }[];
@@ -44,10 +56,12 @@ export type EventInput = {
   detail: string;
   link: string;
   hops: number;
+  /** Who caused it, in the source's own identity: a login name, a chat member id, or empty when the source has none. */
+  actor: string;
 };
 
-const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500 } as const;
-const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops"];
+const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500, actor: 200 } as const;
+const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor"];
 
 export function parseEvent(input: unknown): EventInput {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -72,6 +86,7 @@ export function parseEvent(input: unknown): EventInput {
     detail: field("detail"),
     link: field("link"),
     hops: hops as number,
+    actor: field("actor"),
   };
   // Half a Unicode character is stored and looked up as different bytes, so the same id would never be recognised again.
   if (!event.id.isWellFormed()) throw new InputError("id 里有不完整的字符");
@@ -82,6 +97,8 @@ export function parseEvent(input: unknown): EventInput {
   if (event.link && !/^https?:\/\/[\x21-\x7e]+$/.test(event.link)) {
     throw new InputError("link 要是网址，非 ASCII 的字要先编码");
   }
+  // An actor names who caused it, so it is held to the same shape as a subject: an identity, never prose.
+  if (!/^[A-Za-z0-9#._:\/@-]*$/.test(event.actor)) throw new InputError("actor 只能用字母、数字和 # . _ : / @ -");
   return event;
 }
 
@@ -127,6 +144,28 @@ const validAsk = (ask: Item) =>
 /** A question as a receipt asks it, here asked by a task elsewhere. */
 export const isAsk = (value: unknown) => isItem(value) && validAsk(value as Item);
 
+const REPORT_STATES = ["progress", "waiting", "ready", "blocked", "failed", "dropped"];
+const DECISIONS = ["accept", "stop", "ignore", "unavailable"];
+const STRENGTHS = ["explicit", "inferred"];
+
+const validReport = (report: unknown): boolean => {
+  if (!isItem(report)) return false;
+  const item = report as Item;
+  return only(item, ["state", "note"]) && REPORT_STATES.includes(item.state as string) && optional(item.note, 500);
+};
+
+const validVerdict = (verdict: unknown): boolean => {
+  if (!isItem(verdict)) return false;
+  const item = verdict as Item;
+  return (
+    only(item, ["decision", "reason", "strength", "scope"]) &&
+    DECISIONS.includes(item.decision as string) &&
+    optional(item.reason, 1000) &&
+    (item.strength === undefined || STRENGTHS.includes(item.strength as string)) &&
+    optional(item.scope, 1000)
+  );
+};
+
 const validNotice = (notice: Item) =>
   only(notice, ["title", "text", "key", "fyi"]) &&
   text(notice.title, 200) &&
@@ -158,7 +197,20 @@ export function parseResult(input: unknown): Result {
   }
   const result = { ...input } as Item;
   if (
-    !only(result, ["outcome", "summary", "error", "session", "usage", "ask", "notice", "resolve", "later", "events"])
+    !only(result, [
+      "outcome",
+      "summary",
+      "error",
+      "session",
+      "usage",
+      "ask",
+      "notice",
+      "resolve",
+      "later",
+      "events",
+      "report",
+      "verdict",
+    ])
   ) {
     throw new InputError("结果里有不认识的字段");
   }
@@ -178,6 +230,12 @@ export function parseResult(input: unknown): Result {
   }
   if (!listOf(result.later, 10, validLater)) {
     throw new InputError("later 每一项要有 key，以及带时区的 at 和 about，或者 cancel: true，最多 10 项");
+  }
+  if (result.report !== undefined && !validReport(result.report)) {
+    throw new InputError(`report 要有 state（${REPORT_STATES.join("、")}），note 最多 500 字`);
+  }
+  if (result.verdict !== undefined && !validVerdict(result.verdict)) {
+    throw new InputError(`verdict 要有 decision（${DECISIONS.join("、")}），reason、scope 最多 1000 字`);
   }
   if (result.events !== undefined) {
     if (!items(result.events, 100)) throw new InputError("events 最多 100 项");

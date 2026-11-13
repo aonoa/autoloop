@@ -42,6 +42,9 @@ const HELP = `Agent 自动化中台
                                      --json 输出 /v1/state 的原始结构，给脚本用
   agent-autoloop runs [规则] [--before <第几轮>] [--json]
                                     列出做完的轮次，可以只看一条规则、往前翻；细节再用 why
+  agent-autoloop board [--json]          看谁需要我：待回答的卡片、受阻的轮次、最近的决定和授权
+  agent-autoloop decisions [--json]      最近的决定：每条事件为什么被接受或拒绝
+  agent-autoloop mandates [--json]       有效的授权：凭什么可以开始一件活
   agent-autoloop answer <卡片> [序号] [--text 别的想法]
                                     回答一张卡片；通知不用写序号
   agent-autoloop resolve <卡片> <结果>   这件事不用决定了，写一句结果
@@ -130,6 +133,9 @@ const TAKES: Record<string, { flags: string[]; usage: string }> = {
 rules.json 里这个定时任务要写 cwd；你答了，中台叫醒它的 Agent 在 cwd 照 skill、prompt 接着做。`,
   },
   backup: { flags: [], usage: "用法：agent-autoloop backup [目录]" },
+  board: { flags: ["json"], usage: "用法：agent-autoloop board [--json]" },
+  decisions: { flags: ["json"], usage: "用法：agent-autoloop decisions [--json]" },
+  mandates: { flags: ["json"], usage: "用法：agent-autoloop mandates [--json]" },
   check: { flags: [], usage: "用法：agent-autoloop check [文件]" },
   conformance: { flags: ["config"], usage: "用法：agent-autoloop conformance <测试中台地址> --config <测试凭据文件>" },
   doctor: { flags: [], usage: "用法：agent-autoloop doctor" },
@@ -477,6 +483,105 @@ async function tryIt() {
     }
   }
   fail("五分钟没等到结果。运行 agent-autoloop doctor 看看。");
+}
+
+/** What a person has to look at, and why work started: read-only, from the same state the owner's client reads. */
+async function board(named: Flags) {
+  const state: any = await ownerClient().state();
+  if (named.json !== undefined) {
+    return console.log(
+      JSON.stringify(
+        {
+          matters: state.matters,
+          cards: state.cards,
+          runs: state.runs,
+          decisions: state.decisions,
+          mandates: state.mandates,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+  const matters: any[] = state.matters ?? [];
+  const needsPerson = matters.filter((matter) => matter.stage.startsWith("person/"));
+  const working = matters.filter((matter) => !matter.stage.startsWith("person/"));
+  const label: Record<string, string> = {
+    "person/answer": "待你回答",
+    "person/review": "待你审阅",
+    "person/blocked": "受阻，等你",
+    "person/failed": "失败，等你",
+    "person/delivery": "输入没送到，重试中",
+    "working/queued": "排队",
+    working: "执行中",
+    idle: "等下一步",
+  };
+  const lines: string[] = [];
+  // Grouped by project when rules name one, so a person can read one project at a time.
+  const byProject = (list: any[]) => {
+    const groups = new Map<string, any[]>();
+    for (const matter of list) {
+      const name = matter.project ?? "";
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name)!.push(matter);
+    }
+    return groups;
+  };
+  const listed = (list: any[]) => {
+    for (const [project, matters] of byProject(list)) {
+      if (project) lines.push(`  [${project}]`);
+      for (const matter of matters) {
+        const note = matter.lane ? ` · ${matter.lane}` : "";
+        lines.push(`    ${matter.rule}${note} — ${label[matter.stage] ?? matter.stage}`);
+      }
+    }
+  };
+  lines.push(needsPerson.length ? `需要你：${needsPerson.length} 件` : "需要你：没有");
+  listed(needsPerson);
+  if (working.length) {
+    lines.push("", `在办：${working.length} 件`);
+    listed(working.slice(0, 20));
+  }
+  const decisions = state.decisions ?? [];
+  lines.push("", decisions.length ? `最近的决定：${decisions.length} 条` : "最近的决定：没有");
+  for (const decision of decisions.slice(0, 10)) {
+    lines.push(`  事件 ${decision.event_id} · ${decision.rule} · ${decision.state}（${decision.reason}）`);
+  }
+  const mandates = state.mandates ?? [];
+  lines.push("", mandates.length ? `有效的授权：${mandates.length} 条` : "有效的授权：没有");
+  for (const mandate of mandates.slice(0, 10)) {
+    lines.push(
+      `  事件 ${mandate.event_id} · ${mandate.rule} · ${mandate.strength} · 规则版本 ${mandate.rules_version}`,
+    );
+  }
+  console.log(lines.join("\n"));
+}
+
+/** Why work did or didn't start: one line per decision, newest first. */
+async function decisions(named: Flags) {
+  const state: any = await ownerClient().state();
+  const list = state.decisions ?? [];
+  if (named.json !== undefined) return console.log(JSON.stringify(list, null, 2));
+  if (!list.length) return console.log("还没有决定。");
+  for (const item of list) {
+    const strength = item.strength ? ` · ${item.strength}` : "";
+    console.log(
+      `事件 ${item.event_id} · ${item.rule} · ${item.state}（${item.reason}）${strength} · 规则版本 ${item.rules_version}`,
+    );
+  }
+}
+
+/** What each accepted event was allowed to do, and why. */
+async function mandates(named: Flags) {
+  const state: any = await ownerClient().state();
+  const list = state.mandates ?? [];
+  if (named.json !== undefined) return console.log(JSON.stringify(list, null, 2));
+  if (!list.length) return console.log("还没有授权。");
+  for (const item of list) {
+    console.log(
+      `事件 ${item.event_id} · ${item.rule} · ${item.strength}（${item.reason}）· 范围 ${item.scope} · 规则版本 ${item.rules_version}`,
+    );
+  }
 }
 
 async function status(named: Flags) {
@@ -910,6 +1015,9 @@ const commands: Record<string, () => unknown> = {
   up: async () => (await import("../host/up.ts")).up(),
   try: () => tryIt(),
   status: () => status(flags(args).named),
+  board: () => board(flags(args).named),
+  decisions: () => decisions(flags(args).named),
+  mandates: () => mandates(flags(args).named),
   why: () => why(args),
   runs: () => runs(args),
   conformance: () => checkConformance(args),

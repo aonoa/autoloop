@@ -7,6 +7,8 @@ export const TABLES = [
   "run_events",
   "cards",
   "deliveries",
+  "decisions",
+  "mandates",
   "timers",
   "schedules",
   "seen",
@@ -19,9 +21,9 @@ export type Table = (typeof TABLES)[number];
 export type Change = { table: Table; key: string; row: Row | null };
 export type Fact = { version: 1; seq: number; at: number; type: string; changes: Change[]; meta?: Row };
 export type Match = Record<string, SQLInputValue | SQLInputValue[] | { not: null }>;
-const NUMBERED = new Set<Table>(["events", "runs", "cards", "timers"]);
+const NUMBERED = new Set<Table>(["events", "runs", "cards", "timers", "decisions"]);
 const indexes: Partial<Record<Table, string[][]>> = {
-  events: [["source", "key"], ["routed", "id"], ["paused", "id"], ["id"]],
+  events: [["source", "key"], ["matched", "id"], ["routed", "id"], ["paused", "id"], ["id"]],
   runs: [["state", "id"], ["rule", "lane", "state", "id"], ["id"], ["finished_at"]],
   run_events: [["run_id"], ["event_id"]],
   cards: [
@@ -40,6 +42,8 @@ const indexes: Partial<Record<Table, string[][]>> = {
     ["rule", "lane", "event_id", "id"],
   ],
   deliveries: [["channel"], ["card_id"]],
+  decisions: [["event_id"], ["state"], ["source"]],
+  mandates: [["event_id"], ["rule"], ["granted_at"]],
   due: [["at"]],
 };
 const field = (name: string) => `json_extract(data,'$.${name}')`;
@@ -180,6 +184,7 @@ export function keyOf(table: Table, row: Row): string {
   if (table === "run_events") return `${row.run_id}:${row.event_id}`;
   if (table === "deliveries") return `${row.card_id}:${row.channel}`;
   if (table === "schedules") return row.rule;
+  if (table === "mandates") return `${row.event_id}:${row.rule}`;
   if (table === "seen" || table === "keys") return `${row.kind}:${row.name}`;
   if (table === "due") return `${row.kind}:${row.key}`;
   if (table === "pauses") return row.name;

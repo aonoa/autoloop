@@ -5,6 +5,12 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 type Input = { headers: Record<string, string | string[] | undefined>; body: string; secret: string };
 
+/** A source's identity is used by policy, so it keeps the event protocol's shape: no words, no spaces. */
+const actor = (value: unknown) => {
+  const given = String(value ?? "");
+  return /^[A-Za-z0-9#._:/@-]*$/.test(given) ? given.slice(0, 200) : "";
+};
+
 export default function gitlab({ headers, body, secret }: Input) {
   const given = String(headers["x-gitlab-token"] ?? "");
   const signed = secret && given.length === secret.length && timingSafeEqual(Buffer.from(given), Buffer.from(secret));
@@ -17,6 +23,7 @@ export default function gitlab({ headers, body, secret }: Input) {
   const repo = String(project.path_with_namespace ?? project.name ?? "");
   const object = kind === "note" ? (payload.merge_request ?? payload.issue ?? attributes) : attributes;
   const number = object.iid ? `#${object.iid}` : "";
+  const sender = actor(payload.user?.username);
   return [
     {
       // GitLab before 17.4 has no such header. The body is the same on a retry and differs between events.
@@ -26,6 +33,7 @@ export default function gitlab({ headers, body, secret }: Input) {
       summary: String(attributes.title ?? payload.commits?.[0]?.message ?? "").slice(0, 200),
       detail: String(attributes.description ?? attributes.note ?? "").slice(0, 4000),
       link: encodeURI(String(attributes.url ?? project.web_url ?? "")).slice(0, 500),
+      actor: sender,
     },
   ];
 }

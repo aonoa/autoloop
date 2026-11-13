@@ -5,6 +5,12 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 type Input = { headers: Record<string, string | string[] | undefined>; body: string; secret: string };
 
+/** A source's identity is used by policy, so it keeps the event protocol's shape: no words, no spaces. */
+const actor = (value: unknown) => {
+  const given = String(value ?? "");
+  return /^[A-Za-z0-9#._:/@-]*$/.test(given) ? given.slice(0, 200) : "";
+};
+
 export default function github({ headers, body, secret }: Input) {
   const sign = `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
   const given = String(headers["x-hub-signature-256"] ?? "");
@@ -17,6 +23,7 @@ export default function github({ headers, body, secret }: Input) {
   const type = (payload.action ? `${kind}.${payload.action}` : kind).toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
   const repo = String(payload.repository?.full_name ?? "");
   const number = object?.number ? `#${object.number}` : "";
+  const sender = actor(payload.sender?.login);
   return [
     {
       id: String(headers["x-github-delivery"] ?? ""),
@@ -27,6 +34,7 @@ export default function github({ headers, body, secret }: Input) {
       link: encodeURI(
         String(payload.comment?.html_url ?? object?.html_url ?? payload.repository?.html_url ?? ""),
       ).slice(0, 500),
+      actor: sender,
     },
   ];
 }

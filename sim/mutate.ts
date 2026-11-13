@@ -7,12 +7,17 @@ import { join } from "node:path";
 const edits: [string, string, string, string][] = [
   ["event-duplicate", "decide.ts", "if (existing) {", "if (false && existing) {"],
   ["source-boundary", "decide.ts", "rule.when.source === source", "true"],
-  ["parallel-lane", "decide.ts", 'id, rule.parallel ? event.subject : "")', 'id, "")'],
+  [
+    "parallel-lane",
+    "decide.ts",
+    'enqueue(draft, rule, id, rule.parallel ? event.subject : "", null, false, !!rule.speculate)',
+    'enqueue(draft, rule, id, "", null, false, !!rule.speculate)',
+  ],
   ["session-in-use", "decide.ts", "going.some((other) => (other.session ?? other.resume) === session)", "false"],
   ["resume-after-stop", "decide.ts", 'last?.state !== "cancelled" && ', ""],
   ["group-capacity", "decide.ts", "claimed.filter((other) => other.grp === run.grp).length <", "0 <"],
   ["lane-exclusion", "decide.ts", "!claimed.some((other) => other.grp === run.grp && other.lane === run.lane)", "true"],
-  ["worker-boundary", "decide.ts", "!agents.includes(rule.to)", "false"],
+  ["worker-boundary", "decide.ts", "!agents.includes(agent)", "false"],
   ["retry-delay", "decide.ts", "5 * MINUTE * 2 ** (attempts - 1)", "0 * MINUTE * 2 ** (attempts - 1)"],
   [
     "receipt-replay",
@@ -28,8 +33,8 @@ const edits: [string, string, string, string][] = [
   [
     "answer-wakeup",
     "decide.ts",
-    "if (rule) enqueue(draft, rule, eventId, card.lane,",
-    "if (false) enqueue(draft, rule, eventId, card.lane,",
+    "const run = enqueue(draft, rule, eventId, card.lane, card.agent === rule.to ? card.session : null, true);",
+    "const run = null as number | null;",
   ],
   ["quiet-delivery", "decide.ts", "if (card.quiet ||", "if (false ||"],
   ["delivery-lease", "decide.ts", "not_before: iso(now + MINUTE)", "not_before: iso(now)"],
@@ -77,7 +82,9 @@ export function mutate() {
       cwd: folder,
       env,
       encoding: "utf8",
-      timeout: 30000,
+      // A mutation may remove the write lock's rollback path, leaving SQLite waiting on the lock rather than failing.
+      // The timeout itself is the kill signal there: a hung mutation is caught, not an environment failure.
+      timeout: 60000,
     });
   try {
     // All of it: a test that reads a folder left out here fails the baseline here and nowhere else (#119, then #128).
@@ -112,7 +119,14 @@ export function mutate() {
         const result = run();
         if (result.status === 0) survived.push(mutation.name);
         else {
-          assert.ok(!result.error, `${mutation.name}: ${result.error}`);
+          // A timeout is a caught mutation: the test process did not finish, so the behavior was not preserved.
+          // Any other error means the check itself did not run, so it can't count as a catch.
+          if (result.error)
+            assert.equal(
+              (result.error as NodeJS.ErrnoException).code,
+              "ETIMEDOUT",
+              `${mutation.name}: ${result.error}`,
+            );
           killed++;
         }
         console.log(`${mutation.name}: ${result.status === 0 ? "漏过" : "抓到"}`);

@@ -9,7 +9,9 @@ import { test } from "node:test";
 import { at, setup } from "./helpers.ts";
 
 setup("events");
-const { ingest, unrouted } = await import("./hub.ts");
+const { ingest, unrouted, getView } = await import("./hub.ts");
+const { routingOf, unrouted: eventsUnrouted } = await import("../kernel/query.ts");
+const { evolve } = await import("../kernel/evolve.ts");
 const { InputError } = await import("../kernel/errors.ts");
 const { all, run } = await import("./storage.ts");
 
@@ -89,4 +91,37 @@ test("an event no rule matches is kept for the owner to see, and one source does
     [["ops", "feedback.new"]],
   );
   assert.equal(all("SELECT id FROM runs").length, 0);
+});
+
+test("an event written before matched existed still reads as matched and routed", () => {
+  clean();
+  const view = evolve(getView(), [
+    {
+      version: 1,
+      seq: getView().seq + 1,
+      at: at(0),
+      type: "fixture",
+      changes: [
+        {
+          table: "events",
+          key: "1",
+          row: {
+            id: 1,
+            source: "app",
+            key: "legacy",
+            type: "feedback.new",
+            subject: "#1",
+            summary: "",
+            detail: "",
+            link: "",
+            hops: 0,
+            routed: '["意见"]',
+            received_at: new Date(at(0)).toISOString(),
+          },
+        },
+      ],
+    },
+  ]);
+  assert.deepEqual(routingOf(view.get("events", 1)!).routed, ["意见"], "old routed was the match list");
+  assert.deepEqual(eventsUnrouted(view), [], "an old event with a match isn't shown as unrouted");
 });

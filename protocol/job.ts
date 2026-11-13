@@ -3,7 +3,14 @@ export type Job = {
   run: number;
   token: string;
   attempt: number;
+  /**
+   * `assess` is a round of the assessor Agent: it reads the event and answers with a verdict, doing no work.
+   * `speculate` is a background try whose result is only delivered when it found something worth it.
+   */
+  kind?: "assess" | "speculate";
   rule: Pick<Rule, "name" | "cwd" | "skill" | "prompt" | "title" | "emits">;
+  /** How this rule's messages read where they land: a chat wants a sentence, a review wants a write-up. */
+  style?: "im" | "async";
   agent: {
     id: string;
     name: string;
@@ -18,6 +25,18 @@ export type Job = {
   };
   session: string | null;
   askFirst: string[];
+  /**
+   * Stable references for recalling context by hops: this matter, the rounds already done on it, and other live matters on
+   * the same subject. Each carries an id a later round can name, so an agent needn't be handed everything at once.
+   */
+  thread?: {
+    id: string;
+    rule: string;
+    lane: string;
+    project?: string;
+    rounds: { run: number; state: string; summary: string; at: string | null }[];
+    related: { rule: string; lane: string; stage: string }[];
+  };
   context: {
     events: {
       id: string;

@@ -51,6 +51,19 @@ test("state exposes only pending timers on the first page", () => {
   assert.deepEqual(hub.stateOf(at(101)).timers, []);
 });
 
+test("paging older runs keeps the recent decisions and mandates, which are not per page", () => {
+  const page = hub.stateOf(at(3));
+  const decisions = page.decisions.length;
+  const mandates = page.mandates.length;
+  assert.ok(decisions > 0 && mandates > 0, "the fixture's first event has a decision and a mandate");
+  const older = hub.stateOf(at(3), Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(
+    [older.decisions.length, older.mandates.length],
+    [decisions, mandates],
+    "a page of older runs must not hide the recent governance record",
+  );
+});
+
 test("the state says where in the log it was read, so a client goes on from there in the stream", () => {
   const read = hub.stateOf(at(3));
   assert.equal(read.seq, hub.logAfter(0).at(-1)!.seq);

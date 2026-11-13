@@ -153,7 +153,10 @@ export function stateOf(now = Date.now(), before?: number) {
   db.exec("BEGIN");
   try {
     const latest = getView();
-    return { seq: latest.seq, ...state(now, before, query.configuration(latest), { all, view, unrouted }) };
+    return {
+      seq: latest.seq,
+      ...state(now, before, query.configuration(latest), { all, view, state: latest, unrouted }),
+    };
   } finally {
     db.exec("COMMIT");
   }

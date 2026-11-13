@@ -68,7 +68,11 @@ test("what doesn't decide what's stored can change without a rebuild", () => {
     ["host/runtime.ts", "export const listKeys", "// a comment\nexport const listKeys"],
     ["host/runtime.ts", "const { problem } = reloadRules();", 'const { problem } = reloadRules(); void "other work";'],
     ["kernel/decide.ts", "const MAX_ATTEMPTS = 10;", "const MAX_ATTEMPTS = 11;"],
-    ["host/state.ts", 'summary error usage"', 'summary error usage extra"'],
+    [
+      "host/state.ts",
+      'finished_at manual summary error usage report"',
+      'finished_at manual summary error usage report extra"',
+    ],
   ] as const) {
     assert.equal(formatWith(file, before, after), usual, `${file}: ${after}`);
   }
@@ -88,8 +92,8 @@ test("what decides what's stored brings a rebuild", () => {
     ],
     [
       "kernel/evolve.ts",
-      '["events", "runs", "cards", "timers"]',
-      '["events", "runs", "cards", "timers", "deliveries"]',
+      'new Set<Table>(["events", "runs", "cards", "timers", "decisions"])',
+      'new Set<Table>(["events", "runs", "cards", "timers", "decisions", "deliveries"])',
     ],
     [
       "kernel/credentials.ts",
@@ -114,7 +118,13 @@ test("a change to the read-only views shows at the next start, with no rebuild",
   const usual = start();
   const path = join(code, "host", "state.ts");
   const original = readFileSync(path, "utf8");
-  writeFileSync(path, original.replace('summary error usage"', 'summary error usage rules_version"'));
+  writeFileSync(
+    path,
+    original.replace(
+      'finished_at manual summary error usage report"',
+      'finished_at manual summary error usage report rules_version"',
+    ),
+  );
   try {
     assert.equal(start(), usual);
     const db = new DatabaseSync(join(home, "hub.db"), { readOnly: true });

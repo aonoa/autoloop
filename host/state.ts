@@ -3,21 +3,24 @@
 import type { SQLInputValue } from "node:sqlite";
 import { describeCron, dayStart, nextRun, parseCron } from "../kernel/cron.ts";
 import { SEEN_EVERY } from "../kernel/due.ts";
-import { iso, type Row } from "../kernel/evolve.ts";
+import { iso, type Row, type View } from "../kernel/evolve.ts";
 import type { cardView } from "../kernel/query.ts";
 import { cronOf, eventRule, SCHEDULE, type Rules } from "../kernel/rules.ts";
+import { stagesOf } from "../kernel/stage.ts";
 
 /** The columns of the read-only SQL views over the projections, which the queries here read. */
 const VIEWS = {
-  events: "id source key type subject summary detail link routed paused received_at",
+  events: "id source key type subject summary detail link actor matched routed dispatched paused refused received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
-    "claimed_at seen_at finished_at manual summary error usage",
-  run_events: "run_id event_id",
+    "claimed_at seen_at finished_at manual summary error usage report",
+  run_events: "run_id event_id context",
   cards:
     "id key kind title text options recommend about state fyi quiet choice answer by result rule lane grp source " +
     "agent session run_id answer_event version created_at decided_at closed_at",
   deliveries: "card_id channel version ref tries first_try_at not_before error given_up",
+  decisions: "id event_id rule source actor state reason strength scope rules_version decided_at",
+  mandates: "event_id rule strength reason scope rules_version granted_at",
   timers: "id rule lane key source agent session about at event_id created_at",
   schedules: "rule cron next_at skipped_at",
   seen: "kind name seen_at",
@@ -69,6 +72,8 @@ const EVENTS_OF_RUN = `
 type Reads = {
   all: <T>(sql: string, params?: SQLInputValue[]) => T[];
   view: (card: Row) => ReturnType<typeof cardView>;
+  /** The kernel's own projection, for what the SQL views can't answer (the stage of a matter). */
+  state: View;
   unrouted: () => Row[];
 };
 
@@ -100,8 +105,9 @@ const SKIPPED = `SELECT id, source, type, subject, summary, paused, received_at 
 // The same, for one rule since its pause began, less those a replay has since handed to a run of the rule.
 const SKIPPED_BY = `FROM events WHERE paused > '' AND received_at >= ?
   AND EXISTS (SELECT 1 FROM json_each(paused) WHERE value = ?)
+  AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(refused, '[]')) WHERE value = ?)
   AND NOT EXISTS (SELECT 1 FROM run_events JOIN runs ON runs.id = run_events.run_id
-    WHERE run_events.event_id = events.id AND runs.rule = ?)`;
+    WHERE run_events.event_id = events.id AND runs.rule = ? AND COALESCE(run_events.context, 0) = 0)`;
 /** How many of the events a pause skipped come listed with it; the count says how many there are in all. */
 const LISTED = 20;
 
@@ -116,14 +122,14 @@ const skippedView = ({ paused, received_at: receivedAt, ...event }: Row) => ({
  * them, or all of them.
  */
 export function skippedOf(all: Reads["all"], rule: string, since: string, everything = false) {
-  const { count } = all<{ count: number }>(`SELECT COUNT(*) AS count ${SKIPPED_BY}`, [since, rule, rule])[0];
+  const { count } = all<{ count: number }>(`SELECT COUNT(*) AS count ${SKIPPED_BY}`, [since, rule, rule, rule])[0];
   const columns = "SELECT id, source, type, subject, summary, paused, received_at";
   const order = `ORDER BY +id DESC${everything ? "" : ` LIMIT ${LISTED}`}`;
-  const events = all<Row>(`${columns} ${SKIPPED_BY} ${order}`, [since, rule, rule]);
+  const events = all<Row>(`${columns} ${SKIPPED_BY} ${order}`, [since, rule, rule, rule]);
   return { count, events: events.map(skippedView) };
 }
 
-export function stateOf(now: number, before: number | undefined, rules: Rules, { all, view, unrouted }: Reads) {
+export function stateOf(now: number, before: number | undefined, rules: Rules, { all, view, state, unrouted }: Reads) {
   const seen = new Map(
     all<Row>("SELECT kind, name, seen_at FROM seen").map((row) => [`${row.kind}:${row.name}`, row.seen_at as string]),
   );
@@ -181,6 +187,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       id: rule.name,
       name: rule.name,
       group: rule.group,
+      ...(rule.project && { project: rule.project }),
       agent: rule.to,
       source: eventRule(rule) ? rule.when.source : SCHEDULE,
       types: eventRule(rule) ? rule.when.types : [],
@@ -217,10 +224,17 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       link: run.link ?? "",
       session: run.session,
       usage: run.usage ? JSON.parse(run.usage) : null,
+      report: run.report ? JSON.parse(run.report) : null,
       stopping: run.cancel_at !== null,
       manual: Boolean(run.manual),
       events: all<Row>(EVENTS_OF_RUN, [run.id]),
     })),
+    // What each open matter is waiting for, so a board can put the ones needing a person first.
+    matters: stagesOf(state, rules, now),
+    // What a policy decided, and what it granted: read-only, for looking back at why work started or didn't. These are
+    // the latest overall, like the open cards, not part of the run page: paging older runs must not hide them.
+    decisions: all<Row>("SELECT * FROM decisions ORDER BY id DESC LIMIT 50"),
+    mandates: all<Row>("SELECT * FROM mandates ORDER BY granted_at DESC LIMIT 50"),
     hasMore,
     nextBefore: hasMore ? page[PAGE - 1].id : null,
     unrouted: unrouted(),

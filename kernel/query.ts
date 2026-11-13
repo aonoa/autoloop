@@ -2,6 +2,7 @@
 import { credential, type Environment } from "./credentials.ts";
 import { rows, type Fact, type Row, type View } from "./evolve.ts";
 import { ruleOf, type Rule, type Rules } from "./rules.ts";
+import { stageOf } from "./stage.ts";
 import type { Job } from "../protocol/job.ts";
 
 export function configuration(view: View, version?: number): Rules {
@@ -32,20 +33,35 @@ export function waitingOn(view: View, worker: string, now: number) {
   );
 }
 
+/** Every event a round read, including fan-out context. This is what the Agent gets to read. */
 export function eventsOf(view: View, runId: number) {
   const links = rows(view, "run_events", { run_id: runId });
   return links.map((link) => view.get("events", link.event_id)!).sort((a, b) => a.id - b.id);
 }
 
+/** The events a round actually took for its rule, leaving out context added by fan-out. */
+export function takenEventsOf(view: View, runId: number) {
+  const links = rows(view, "run_events", { run_id: runId });
+  return links
+    .filter((link) => !link.context)
+    .map((link) => view.get("events", link.event_id)!)
+    .sort((a, b) => a.id - b.id);
+}
+
+/** The source a round is about: one source among the events it took, never context from another rule's matter. */
 export function sourceOf(view: View, runId: number) {
-  const sources = [...new Set(eventsOf(view, runId).map((event) => event.source))];
+  const sources = [...new Set(takenEventsOf(view, runId).map((event) => event.source))];
   return sources.length === 1 ? sources[0] : null;
 }
 
 /** The rules an event went to, and the ones that would have taken it but were paused. */
 export function routingOf(event: Row) {
   const paused: string[] = JSON.parse(event.paused ?? "[]");
-  return { routed: JSON.parse(event.routed).filter((name: string) => !paused.includes(name)), paused };
+  const refused: string[] = JSON.parse(event.refused ?? "[]");
+  // Older facts have no `dispatched`: before it existed, `routed` was the match list. `matched` is the current field.
+  const dispatched: string[] = JSON.parse(event.dispatched ?? "null") ?? JSON.parse(event.routed);
+  const routed = dispatched.filter((name: string) => !paused.includes(name) && !refused.includes(name));
+  return { routed, paused, ...(refused.length && { refused }) };
 }
 
 /**
@@ -55,7 +71,9 @@ export function routingOf(event: Row) {
 export function eventOutcome(view: View, source: string, id: number) {
   const event = view.get("events", id);
   if (event?.source !== source || !event.sent) return null;
+  // A run that only read this event as fan-out context is not an outcome of it.
   const runs = rows(view, "run_events", { event_id: id })
+    .filter((link) => !link.context)
     .map((link) => view.get("runs", link.run_id)!)
     .sort((a, b) => a.id - b.id);
   return {
@@ -121,15 +139,58 @@ export function cardView(card: Row, env: Environment, ref: string | null = null,
   };
 }
 
-export function jobOf(view: View, run: Row, env: Environment): Job {
+/** The style of the place a rule's messages land: its own channels' first stated one, else the default channels'. */
+function styleOf(rules: Rules, rule: Rule): "im" | "async" | undefined {
+  const names = rule.channels ?? rules.defaultChannels ?? Object.keys(rules.channels);
+  for (const name of names) {
+    const style = rules.channels[name]?.style;
+    if (style) return style;
+  }
+  return undefined;
+}
+
+/** The stable name of a matter: rule and lane, which is what a later round or a related rule can name. */
+export const threadId = (rule: string, lane: string) => `${rule}:${lane}`;
+
+/** What an agent can recall by hops: its own matter, its past rounds, and other live matters on the same subject. */
+function threadOf(view: View, rules: Rules, run: Row, now: number): NonNullable<Job["thread"]> {
+  const rounds = rows(view, "runs", { rule: run.rule, lane: run.lane }, 10, true).map((other) => ({
+    run: other.id,
+    state: other.state,
+    summary: other.summary ?? "",
+    at: other.finished_at ?? null,
+  }));
+  const related = run.lane
+    ? rows(view, "runs", { lane: run.lane, state: ["queued", "claimed"] })
+        .filter((other) => other.rule !== run.rule)
+        .map((other) => ({
+          rule: other.rule,
+          lane: other.lane,
+          stage: stageOf(view, rules, other.rule, other.lane, now),
+        }))
+    : [];
+  const definition = ruleOf(rules, run.rule);
+  return {
+    id: threadId(run.rule, run.lane),
+    rule: run.rule,
+    lane: run.lane,
+    ...(definition?.project && { project: definition.project }),
+    rounds,
+    related,
+  };
+}
+
+export function jobOf(view: View, run: Row, env: Environment, now = Date.parse(run.created_at)): Job {
   const rules = configuration(view, run.rules_version);
   const { name, cwd, skill, prompt, title, emits } = ruleOf(rules, run.rule)!;
   const { maxActive: _maxActive, ...agent } = rules.agents[run.agent];
+  // An assessor reads and judges; a speculative try rehearses. Neither may change files or reach the outside world.
+  const access = run.kind ? "read" : agent.access;
   const events = eventsOf(view, run.id);
-  const eventIds = events.map((event) => event.id);
+  const takenIds = takenEventsOf(view, run.id).map((event) => event.id);
   const thread = { rule: run.rule, lane: run.lane };
-  const answers = rows(view, "cards", { ...thread, answer_event: eventIds });
-  const timers = rows(view, "timers", { ...thread, event_id: eventIds });
+  const answers = rows(view, "cards", { ...thread, answer_event: takenIds });
+  const timers = rows(view, "timers", { ...thread, event_id: takenIds });
   const waiting = rows(view, "timers", { ...thread, event_id: null });
   const decided = ["decided", "done"]
     .flatMap((state) => rows(view, "cards", { ...thread, state }, 20, true))
@@ -140,10 +201,13 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     run: run.id,
     token: credential(env, "run", run.id, run.issued),
     attempt: run.attempts + 1,
+    ...(run.kind && { kind: run.kind }),
     rule: { name, cwd, skill, prompt, title, emits },
-    agent: { ...agent, id: run.agent },
+    ...(styleOf(rules, ruleOf(rules, run.rule)!) && { style: styleOf(rules, ruleOf(rules, run.rule)!) }),
+    agent: { ...agent, id: run.agent, access },
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
+    thread: threadOf(view, rules, run, now),
     context: {
       events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
         const sourceName = rules.sources[source]?.name ?? source;
@@ -187,7 +251,15 @@ export function cancels(view: View, worker: string): number[] {
 }
 
 export function unrouted(view: View, limit = 20) {
-  return rows(view, "events", { routed: "[]" }, limit, true);
+  // Older facts have no `matched`: their `routed` is the only record of what the rules matched.
+  return [
+    ...rows(view, "events", { matched: "[]" }, limit, true),
+    ...rows(view, "events", {}, limit, true).filter(
+      (event) => event.matched === undefined && (event.routed ?? "[]") === "[]",
+    ),
+  ]
+    .sort((a, b) => b.id - a.id)
+    .slice(0, limit);
 }
 
 export const safeFact = (fact: Fact) => ({ ...fact, changes: fact.changes.filter(({ table }) => table !== "keys") });

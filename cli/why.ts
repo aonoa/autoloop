@@ -18,6 +18,7 @@ export function formatWhy(id: number, facts: Fact[]) {
   }
   const ownRelations = [...relations.values()].filter((relation) => relation.run_id === id);
   const events = new Set(ownRelations.map((relation) => relation.event_id));
+  const taken = new Set(ownRelations.filter((relation) => !relation.context).map((relation) => relation.event_id));
   const runs = allChanges.filter(({ table, row }) => table === "runs" && row?.id === id).map(({ row }) => row!);
   const links = new Map<number, string>();
   for (const run of runs) if (run.issued && run.link) links.set(run.issued, run.link);
@@ -87,9 +88,9 @@ export function formatWhy(id: number, facts: Fact[]) {
     for (const [changed, { table, key, row }] of changes) {
       const before = previous.get(changed);
       if (table === "events" && row && !before && events.has(row.id)) {
-        add(row.received_at, `触发事件：${eventText(row)}`);
+        add(row.received_at, `${taken.has(row.id) ? "触发事件" : "相关资料"}：${eventText(row)}`);
       }
-      if (fact.type === "replayRule" && table === "run_events" && row?.run_id === id) {
+      if (fact.type === "replayRule" && table === "run_events" && row?.run_id === id && !row.context) {
         const event = previous.get(`events:${row.event_id}`);
         add(fact.at, `本人补跑暂停时跳过的事件${event ? `：${eventText(event)}` : ""}`);
       }

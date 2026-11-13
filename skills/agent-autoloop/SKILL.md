@@ -36,6 +36,16 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
 - 默认的先问清单是 `askFirst`，用户说什么事必须先问他，就改这里。
 - 用户在别的地方定时跑的任务（Claude、Codex 应用里），写进 `elsewhere`，只在 `agent-autoloop status` 里列出来；它们要找用户时运行 `agent-autoloop tell <编号> --task <任务名>`，内容从标准输入传。要用户拍板的，给这个任务写上 `cwd` 和 `skill` 或 `prompt`，任务里运行 `agent-autoloop ask --task <任务名>`，标准输入传回执那样的 `ask`：卡片带选项，用户点了，中台叫醒它的 Agent 在 `cwd` 照 `skill`、`prompt` 接着做，回答在这一轮资料文件的 `answers` 里。
 
+### 治理与增强（都可选，不写就还是原来的行为）
+
+- **谁可以发起工作**：顶层 `policy` 写 `{ "accept": "gate" }`，再给来源写 `policy`：`allowlist` 是能发起工作的身份，`admission: "named"` 要求事件点名 Agent，`bots` 列出允许产生候选的机器人。来源的 `actor` 为空、不在名单、不是允许的 bot 时，事件照记、决定照写，但不派活。
+- **让模型先研判**：`{ "accept": "assess", "assessor": "<Agent 编号>" }`。先派一轮只读研判，回执里的 `verdict.decision` 为 `accept` 才写授权并派正式轮；`stop` / `ignore` / `unavailable` 只留决定。研判轮以 `read` 权限运行，`command` 插件不受 `access` 约束，只能靠提示词，要硬隔离就用只读账号或容器。
+- **同一对象的资料扇出**：`policy.fanout: true` 让同一对象上其他已在办的事项把事件当资料读，不授予权限、不写授权、不参与研判结算。默认关。
+- **后台预演**：规则写 `"speculate": true`，先派一轮只读预演；回执 `report.state` 是 `ready` 或 `progress` 才把同一批事件交给正式轮，否则安静收尾。预演也以 `read` 权限运行。
+- **结构化阶段**：回执可带 `report: { "state": "progress|waiting|ready|blocked|failed|dropped", "note": "…" }`。事项的 `blocked` / `failed` 只有本人回答、结案或手动 `run` 能释放，之后自动事件才重新入队。
+- **多项目与输出风格**：规则写 `"project": "app"` 可派生 `group` 和 `cwd`；通道写 `"style": "im"` 让消息短、适合聊天，写 `"async"` 让消息完整、适合评论或邮件。
+- **只读查看**：`agent-autoloop board`、`decisions`、`mandates` 分别看待回答/受阻事项、决定和授权，都支持 `--json`。`status` 里的 `matters` 也会列出每个在办事项的阶段。
+
 现成场景和内置插件从 [README](../../README.md#拿来即用的场景模板)进入，开发示例见[写插件](../../docs/plugins.md)。用户想接自动化时先从例子改，不要从零写：`examples/recipes/` 里有早报（`morning-brief`）、处理 GitHub issue（`github-issues`）、线上报错（`ops-alerts`）、反馈处理（`feedback`）、网站巡检（`website-watch`）、飞书周报与业务摘要（`feishu-brief`）和 Claude 浏览器交接（`browser-handoff`），每个都有规则、Skill 和写明权限原因的 README。反馈、巡检、飞书摘要和浏览器交接默认飞书本人私聊；按模板说明替换虚构标识，业务资料留在私有目录，读取用本人身份，通知用机器人身份。要写新的 Agent、通道或事件插件，看教程 `docs/plugins.md` 和最小例子 `examples/plugins/`。
 
 ## 写处理手册

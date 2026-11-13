@@ -96,7 +96,7 @@ Claude 委托 Codex 的完整规则、Skill 和参数调用脚本见[浏览器�
 
 从 [hello-source/source.ts](../examples/plugins/hello-source/source.ts) 开始。它检查 `x-shop-signature` 中的 HMAC-SHA256，再把订单变成事件。
 
-默认导出同步函数，参数为 `{ headers, body, secret }`。先验签，再解析原文；返回事件数组，无事返回 `[]`，拒绝请求就抛异常。事件插件只翻译，不发请求。
+默认导出同步函数，参数为 `{ headers, body, secret }`。先验签，再解析原文；返回事件数组，无事返回 `[]`，拒绝请求就抛异常。事件插件只翻译，不发请求。要参与 Policy 的来源可再带一个可选的 `actor`：从平台自己的身份字段取，只放标识符字符；取不到就不写，内核会按空身份处理。插件不需要认识 Policy。
 
 在 `rules.json` 登记来源：
 
@@ -104,7 +104,7 @@ Claude 委托 Codex 的完整规则、Skill 和参数调用脚本见[浏览器�
 { "shop": { "name": "商店", "adapter": "hello-source" } }
 ```
 
-请求地址是 `/v1/in/shop`；秘密放在 `secrets.env` 的 `AGENT_AUTOLOOP_SECRET_SHOP`（来源名转大写，`-` 换成 `_`；改完重启中台），不写进规则。事件必须有稳定的 `id` 和合法的 `type`，可带 `subject`、`summary`、`detail`、`link`，上限见[协议](protocol.md#来源把世界变成事件)。
+请求地址是 `/v1/in/shop`；秘密放在 `secrets.env` 的 `AGENT_AUTOLOOP_SECRET_SHOP`（来源名转大写，`-` 换成 `_`；改完重启中台），不写进规则。事件必须有稳定的 `id` 和合法的 `type`，可带 `subject`、`summary`、`detail`、`link`、`actor`，上限见[协议](protocol.md#来源把世界变成事件)。
 
 来源能直接发标准 JSON 时不必写插件，用来源密钥调用 `POST /v1/events` 即可，之后用同一把密钥 `GET /v1/events/<编号>` 查它做到哪了（见[协议](protocol.md#来源把世界变成事件)）。
 
