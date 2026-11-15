@@ -1,0 +1,44 @@
+{
+  "timezone": "Asia/Shanghai",
+  "sources": {
+    "qq": {
+      "name": "QQ 私聊",
+      "policy": {
+        "allowlist": ["YOUR_QQ_NUMBER"]
+      }
+    }
+  },
+  "agents": {
+    "codex": {
+      "name": "Codex",
+      "worker": "this-machine",
+      "use": "codex",
+      "access": "full"
+    }
+  },
+  "channels": {
+    "qq-source": {
+      "name": "QQ 私聊来源"
+    },
+    "napcat": {
+      "name": "QQ（NapCat）",
+      "answerers": ["YOUR_QQ_NUMBER"]
+    }
+  },
+  "defaultChannels": ["napcat"],
+  "rules": [
+    {
+      "name": "QQ 任务",
+      "when": {
+        "source": "qq",
+        "types": ["qq.task", "card.answered"]
+      },
+      "to": "codex",
+      "cwd": "~/work",
+      "prompt": "这是 QQ 私聊或群里交代的任务。消息可以用 /项目名 开头指定项目；同一项目接着原来的会话。直接处理；需要本人拍板时用 ask 卡片提问，完成后用一句话汇报结果。",
+      "tell": "always",
+      "parallel": 4,
+      "resume": true
+    }
+  ]
+}

@@ -9,6 +9,7 @@ import {
   agentsOf,
   cardView,
   configuration,
+  dispatchSnapshot,
   eventsOf,
   jobOf,
   takenEventsOf,
@@ -18,9 +19,21 @@ import {
   sourceOf,
   waitingOn,
   workerOf,
+  workerOnline,
   workers,
 } from "./query.ts";
-import { admit, cronOf, eventRule, ruleOf, SCHEDULE, typeMatches, type Rule, type Rules } from "./rules.ts";
+import {
+  admit,
+  cronOf,
+  DISPATCH_RULE,
+  eventRule,
+  ruleOf,
+  SCHEDULE,
+  subjectMatches,
+  typeMatches,
+  type Rule,
+  type Rules,
+} from "./rules.ts";
 import { stageOf } from "./stage.ts";
 import {
   addUsage,
@@ -121,6 +134,13 @@ function assignQueued(draft: Draft, run: Row) {
 }
 const threadOf = (run: Row) => ({ rule: run.rule, lane: run.lane, grp: run.grp });
 
+/** A notice about a run belongs where its events came from, so a private chat's failure goes back to that person rather
+ * than to whatever conversation the channel is configured to use by default. */
+function noticeTarget(draft: Draft, run: Row) {
+  const reply = replyOf(draft.view, run.id);
+  return { ...threadOf(run), ...(reply && { reply }) };
+}
+
 /** The session a round about to start goes on in. With resume, one that has none takes its thread's last, unless that round was
  * stopped: what stopped it, or the owner's reason, would meet this one too. Rounds on a thread can share a session, so another
  * still going, or one the hub lost track of, may be running in it: a second process mustn't open it, and a new one starts. */
@@ -160,6 +180,19 @@ const closeStopped = (draft: Draft, run: number, result: string) =>
 const closeOffline = (draft: Draft, worker: string) =>
   closeOpen(draft, (key) => key.startsWith(`worker:${worker}:offline:`), "连上了");
 
+/** The conversation a run's events came from, when all of them agree on one. It is data from the source, never a target
+ * chosen by the Agent. */
+function replyOf(view: View, runId: number) {
+  const replies = [
+    ...new Set(
+      takenEventsOf(view, runId)
+        .map((event) => event.reply)
+        .filter(Boolean),
+    ),
+  ];
+  return replies.length === 1 ? String(replies[0]) : undefined;
+}
+
 /** Whether a new stamp would tell nothing this one doesn't. One in the future means a clock was set back: it gets redone. */
 function justSeen({ now }: Draft, row?: Row) {
   const age = now - Date.parse(row?.seen_at);
@@ -169,9 +202,9 @@ function justSeen({ now }: Draft, row?: Row) {
 function createCard(draft: Draft, spec: Row) {
   const [existing] = rows(draft.view, "cards", { key: spec.key, ...(!spec.once && { state: "open" }) }, 1, true);
   if (existing) return { card: existing.id, duplicate: true };
-  const { once, run, options, fyi, quiet, ...fields } = spec;
+  const { once, options, fyi, quiet, run, run_id: runId, ...fields } = spec;
   const stored = {
-    run_id: run ?? null,
+    run_id: runId ?? run ?? null,
     options: JSON.stringify(options ?? []),
     fyi: fyi ? 1 : 0,
     quiet: quiet ? 1 : 0,
@@ -193,6 +226,7 @@ function enqueue(
   resume?: string | null,
   fromPerson = false,
   speculative = false,
+  fresh = false,
 ) {
   // A matter waiting on a person after a blocked or failed report takes no automatic input: only their message releases it.
   if (!fromPerson) {
@@ -203,9 +237,10 @@ function enqueue(
   const stamps = { not_before: draft.at, created_at: draft.at, rules_version: rulesVersion };
   const kind = speculative ? "speculate" : undefined;
   const run =
-    rows(draft.view, "runs", { rule: rule.name, lane, state: "queued" }).find(
-      (other) => (other.kind ?? null) === (kind ?? null),
-    ) ??
+    (!fresh &&
+      rows(draft.view, "runs", { rule: rule.name, lane, state: "queued" }).find(
+        (other) => (other.kind ?? null) === (kind ?? null),
+      )) ||
     add(draft, "runs", {
       rule: rule.name,
       agent: rule.to,
@@ -216,6 +251,7 @@ function enqueue(
       ...stamps,
     });
   put(draft, "run_events", `${run.id}:${event}`, { run_id: run.id, event_id: event });
+  if (fresh) put(draft, "runs", run.id, { session: null, resume: null });
   if (resume) put(draft, "runs", run.id, { resume });
   return run.id as number;
 }
@@ -243,6 +279,8 @@ function recordEvent(
     link: event.link ?? "",
     hops: event.hops ?? 0,
     actor: event.actor ?? "",
+    // `parseEvent` may drop a field whose value is empty; `ingest` passes the parsed event, which carries a validated reply.
+    ...(event.reply && { reply: event.reply }),
     // What the rules matched. `routed` is what was actually dispatched, and is filled in as work is queued.
     matched: JSON.stringify(matched),
     routed: "[]",
@@ -267,7 +305,10 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false, orig
   }
   const tooDeep = event.hops > MAX_HOPS;
   const takes = (rule: Rule) =>
-    eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, event.type);
+    eventRule(rule) &&
+    rule.when.source === source &&
+    typeMatches(rule.when.types, event.type) &&
+    subjectMatches(rule.when.subjects, event.subject);
   const matched = tooDeep ? [] : draft.rules.rules.filter(takes);
   // A paused rule doesn't take the event, and nothing is kept back for it: the event is recorded as skipped for it.
   const isPaused = (rule: Rule) => !!pauseOf(draft.view, rule, draft.now);
@@ -319,6 +360,25 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false, orig
     dispatch(draft, id, rule, verdicts.get(rule.name)!, undefined, false);
   }
   for (const rule of toAssess) enqueueAssessment(draft, id, source, event, rule);
+  // An event no rule matched, or one only a project's alias names, is placed deterministically first. Only a dispatcher
+  // sees what is left, and it never sees an event a policy refused.
+  const eventRow = draft.view.get("events", id)!;
+  const alias = !matched.length && !tooDeep && origin === "external" ? byAlias(draft, eventRow) : undefined;
+  if (alias) {
+    // An alias is still an automatic external event: it must not wake a matter that is waiting for a person.
+    const run = enqueue(draft, alias, id, alias.parallel ? event.subject : "", null, false);
+    const admission = routeAdmission(draft, eventRow, alias);
+    if (run !== null) dispatch(draft, id, alias, admission, alias.project);
+    if (run !== null) dispatched.push(alias.name);
+  } else if (
+    !matched.length &&
+    origin === "external" &&
+    draft.rules.policy?.dispatch &&
+    !tooDeep &&
+    sourceAdmitsActor(draft, eventRow)
+  ) {
+    enqueueDispatch(draft, id, source);
+  }
   // Only an event a rule took may become context: a refused event stays out of every live matter too.
   if (draft.rules.policy?.fanout && event.subject && dispatched.length)
     fanOut(draft, id, event, new Set(matched.map((rule) => rule.name)));
@@ -468,6 +528,220 @@ function dispatch(
     fanOut(draft, eventId, event, new Set(JSON.parse(event.matched ?? "[]")));
 }
 
+/** The gate's answer for a route the hub chose: the same source policy a normal match would meet. */
+function routeAdmission(draft: Draft, event: Row, rule: Rule) {
+  const sourcePolicy = draft.rules.sources[event.source]?.policy;
+  const agent = draft.rules.agents[rule.to];
+  return admit(
+    draft.rules.policy,
+    sourcePolicy,
+    { id: rule.to, name: agent.name },
+    {
+      subject: event.subject ?? "",
+      summary: event.summary ?? "",
+      actor: event.actor ?? "",
+    },
+  );
+}
+
+/** The deterministic way to place an unplaced event: an exact subject or an alias. It grants nothing until the rule is taken. */
+function byAlias(draft: Draft, event: Row) {
+  const rule = draft.rules.rules.find(
+    (rule) =>
+      rule.project &&
+      eventRule(rule) &&
+      rule.when.source === event.source &&
+      typeMatches(rule.when.types, event.type) &&
+      [...(rule.when.subjects ?? []), ...(rule.aliases ?? [])].some((pattern) =>
+        subjectMatches([pattern], event.subject),
+      ),
+  );
+  if (!rule || routeAdmission(draft, event, rule).state !== "accept") return undefined;
+  // An alias chooses a project; it does not bypass the project's node or its waiting-for-a-person stage.
+  return placementProblem(draft, event, rule.project!) === null ? rule : undefined;
+}
+
+/** The source-level part of the gate, before a project is known: who may originate work at all. */
+function sourceAdmitsActor(draft: Draft, event: Row) {
+  const policy = draft.rules.policy;
+  const source = draft.rules.sources[event.source]?.policy;
+  if (!policy || (policy.accept ?? "off") === "off" || !source) return true;
+  const actor = String(event.actor ?? "");
+  if (!actor) return false;
+  if (source.bots?.includes(actor)) return true;
+  return !source.allowlist?.length || source.allowlist.includes(actor);
+}
+
+/** The project a dispatcher named, if this source and event type can reach its rule. */
+function projectRule(draft: Draft, project: string, source: string, type: string) {
+  return draft.rules.rules.find(
+    (rule) =>
+      rule.project === project && eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, type),
+  );
+}
+
+/** A round of the dispatcher Agent: it reads an unplaced event and answers with a route, and does no work. */
+function enqueueDispatch(draft: Draft, eventId: number, source: string) {
+  const agent = draft.rules.policy?.dispatch?.agent;
+  if (!agent) return null;
+  // One unplaced event, one round: a dispatcher answers for one event, so merging several into a round would leave all
+  // but the first unassigned.
+  const run = add(draft, "runs", {
+    rule: DISPATCH_RULE,
+    agent,
+    grp: "dispatch",
+    lane: "",
+    state: "queued",
+    kind: "dispatch",
+    source: `dispatch:${source}`,
+    not_before: draft.at,
+    created_at: draft.at,
+    rules_version: draft.view.get("config", "rules")!.version,
+  });
+  put(draft, "run_events", `${run.id}:${eventId}`, { run_id: run.id, event_id: eventId });
+  return run.id as number;
+}
+
+/** Why a project cannot take this event: the hub's answer, never the model's word. */
+function placementProblem(draft: Draft, event: Row, project: string) {
+  const rule = projectRule(draft, project, event.source, event.type);
+  if (!rule) return `项目「${project}」没有能接这个来源和类型的规则`;
+  const agent = draft.rules.agents[rule.to];
+  if (!agent) return `项目「${project}」的 Agent 不在了`;
+  if (!workerOnline(draft.view, agent.worker, draft.now))
+    return `项目「${project}」所在的节点 ${agent.worker} 没上线或已离线`;
+  if (routeAdmission(draft, event, rule).state === "ignore") return "这件事的发送人没有权限放进这个项目";
+  const lane = rule.parallel ? event.subject : "";
+  const stage = stageOf(draft.view, draft.rules, rule.name, lane, draft.now);
+  if (stage === "person/blocked" || stage === "person/failed") return `项目「${project}」现在在等人处理，不能接新活`;
+  return null;
+}
+
+/** Why a route cannot be used: the hub's answer, never the model's word. */
+function routeProblem(draft: Draft, run: Row, route: NonNullable<Result["route"]>) {
+  const [event] = assessedEventsOf(draft, run);
+  if (!event) return "找不到要分配的事件";
+  return placementProblem(draft, event, route.project);
+}
+
+/** The projects a person may choose for an event: those whose rules can take it and whose source admits it. */
+function projectChoices(draft: Draft, event: Row) {
+  const projects = draft.rules.rules
+    .filter(
+      (rule) =>
+        rule.project &&
+        eventRule(rule) &&
+        rule.when.source === event.source &&
+        typeMatches(rule.when.types, event.type) &&
+        routeAdmission(draft, event, rule).state === "accept",
+    )
+    .map((rule) => rule.project!);
+  return [...new Set(projects)].filter((project) => !placementProblem(draft, event, project));
+}
+
+/** A card that lets a person place an event. Its answer is read by `answer`, not by the dispatcher. */
+function askPlacement(draft: Draft, event: Row, run: Row, title: string, why: string, projects: string[], key: string) {
+  const offered = projects.slice(0, 4);
+  const listed = offered.length ? `\n可选项目：${offered.join("、")}。` : "";
+  // A card needs at least two choices; with no project able to take it, the only real choice is to leave it.
+  const options = offered.length ? [...offered, "先放着"] : ["先放着", "知道了"];
+  return createCard(draft, {
+    key,
+    kind: "ask",
+    title,
+    text: `${why}。${listed}\n\n来源：${event.source}\n事件：${event.summary || event.type}`,
+    options,
+    source: event.source,
+    lane: event.subject,
+    grp: "dispatch",
+    run_id: run.id,
+    about: `调度事件 ${event.id}`,
+  });
+}
+
+/** Put an event into a project through the same dispatch path as any other event. */
+function placeEvent(
+  draft: Draft,
+  event: Row,
+  project: string,
+  session: "continue" | "new",
+  reason: string,
+): string | null {
+  const problem = placementProblem(draft, event, project);
+  if (problem) return problem;
+  const rule = projectRule(draft, project, event.source, event.type)!;
+  const lane = rule.parallel ? event.subject : "";
+  const [last] = rows(draft.view, "runs", { rule: rule.name, lane, state: ["done", "nothing"] }, 1, true);
+  const resume = session === "continue" && last?.agent === rule.to ? last.session : undefined;
+  const queued = enqueue(draft, rule, event.id, lane, resume, false, false, session === "new");
+  if (queued === null) return `项目「${project}」现在不能接新活`;
+  dispatch(
+    draft,
+    event.id,
+    rule,
+    { state: "accept", strength: "inferred", reason: "dispatched" },
+    reason || project,
+    false,
+  );
+  return null;
+}
+
+/** A dispatcher's route: checked here, then the same dispatch path as any other event. */
+function applyRoute(draft: Draft, run: Row, result: Result) {
+  put(draft, "runs", run.id, {
+    state: result.outcome,
+    finished_at: draft.at,
+    summary: result.summary ?? "",
+    error: null,
+    cancel_at: null,
+  });
+  closeOpen(draft, (key) => key === `run:${run.id}:failing`, "后来跑成了");
+  closeOpen(draft, (key) => key === `run:${run.id}:unknown`, "结果回来了");
+  const [event] = assessedEventsOf(draft, run);
+  if (!event) return [];
+  const route = result.route;
+  const problem = route ? routeProblem(draft, run, route) : "调度没有给出项目";
+  if (route && !problem && route.confidence < (draft.rules.policy?.dispatch?.minConfidence ?? 0.7)) {
+    unassigned(draft, event, run, `调度拿不准（置信度 ${route.confidence}），项目「${route.project}」没有执行`, route);
+    return [];
+  }
+  if (!route) {
+    unassigned(draft, event, run, problem ?? "调度没有给出项目");
+    return [];
+  }
+  if (problem) {
+    unassigned(draft, event, run, problem ?? "调度没有给出项目", route);
+    return [];
+  }
+  if (route.session === "ask") {
+    const choices = projectChoices(draft, event);
+    const rest = choices.filter((project) => project !== route.project);
+    askPlacement(
+      draft,
+      event,
+      run,
+      "这件事要放到哪个项目？",
+      `调度建议「${route.project}」，但需要你确认`,
+      [route.project, ...rest],
+      `dispatch-ask:${event.id}`,
+    );
+    return [];
+  }
+  const problemNow = placeEvent(draft, event, route.project, route.session, route.reason ?? route.project);
+  if (problemNow) unassigned(draft, event, run, problemNow, route);
+  return [];
+}
+
+/** An event no project took: recorded once, and shown to a person with the route that was considered. */
+function unassigned(draft: Draft, event: Row, run: Row, why: string, route?: Result["route"]) {
+  const key = `dispatch:${event.id}`;
+  if (rows(draft.view, "cards", { key }, 1, true)[0]) return;
+  const considered = route
+    ? `\n考虑过项目「${route.project}」，置信度 ${route.confidence}${route.reason ? `：${route.reason}` : ""}。`
+    : "";
+  askPlacement(draft, event, run, "有件事没分配到项目", `${why}${considered}`, projectChoices(draft, event), key);
+}
+
 /** What an assessor round decided about each event it read: the only thing that makes its rule take the event. */
 function applyVerdict(draft: Draft, run: Row, verdict: NonNullable<Result["verdict"]>) {
   const rule = ruleNamed(draft, run.rule);
@@ -548,10 +822,21 @@ function cardFromReceipt(draft: Draft, run: Row, kind: string, card: Row) {
   const fyi = kind === "notice" && card.fyi === true;
   const quiet = kind === "notice" && ruleNamed(draft, run.rule)?.tell === "never";
   const origin = { source: sourceOf(draft.view, run.id), agent: run.agent, session, run: run.id };
+  const reply = replyOf(draft.view, run.id);
   const key = `thread:${run.rule}:${run.lane}:${name}`;
   // Closed as it's made, nothing open stops it coming again: a run trying again says it once.
   if (fyi && rows(draft.view, "cards", { key, run_id: run.id }, 1).length) return;
-  createCard(draft, { ...card, hops: hopsOf(draft, run), key, kind, fyi, quiet, ...threadOf(run), ...origin });
+  createCard(draft, {
+    ...card,
+    hops: hopsOf(draft, run),
+    key,
+    kind,
+    fyi,
+    quiet,
+    ...threadOf(run),
+    ...origin,
+    ...(reply && { reply }),
+  });
 }
 
 /** Notices what has gone quiet: a worker that stopped coming, a run its worker stopped mentioning. */
@@ -567,7 +852,7 @@ function sweep(draft: Draft) {
         put(draft, "runs", run.id, { state: "unknown" });
         const agent = configuration(draft.view, run.rules_version).agents[run.agent].name;
         const words = `交给 ${agent} 后超过 5 分钟没有回音，不确定做没做完；后续新任务照常处理。`;
-        notify(draft, `run:${run.id}:unknown`, run.rule, words, threadOf(run));
+        notify(draft, `run:${run.id}:unknown`, run.rule, words, noticeTarget(draft, run));
       }
     }
     const waiting = waitingOn(draft.view, worker, now);
@@ -589,21 +874,26 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   const agents = agentsOf(draft.view, worker);
   const runs = rows(draft.view, "runs", { state: ["queued", "claimed"] });
   const claimed = runs.filter((run) => run.state === "claimed");
-  const groupLimit = (group: string) => draft.rules.rules.find((rule) => rule.group === group)?.parallel ?? 1;
+  const groupLimit = (group: string) =>
+    group === "dispatch" ? 1 : (draft.rules.rules.find((rule) => rule.group === group)?.parallel ?? 1);
   const claimable = (run: Row) => {
     if (run.state !== "queued") return false;
-    const rule = ruleNamed(draft, run.rule);
+    // A dispatcher round has no rule of its own: it belongs to the Agent it was queued for and is not held by a pause.
+    const rule = run.kind === "dispatch" ? undefined : ruleNamed(draft, run.rule);
     // An ordinary round queued before a rules change still belongs to the rule's current agent; a kinded round belongs to
     // the agent it was queued for.
     const agent = run.kind ? run.agent : rule?.to;
     // What was queued before a pause, or an answer that came in during one, waits for the resume.
-    if (!rule || !agent || !agents.includes(agent) || pauseOf(draft.view, rule, draft.now)) return false;
+    if (!agent || !agents.includes(agent)) return false;
+    if (rule && pauseOf(draft.view, rule, draft.now)) return false;
     const agentLimit = draft.rules.agents[agent]?.maxActive;
     return (
       Date.parse(run.not_before) <= draft.now &&
       !claimed.some((other) => other.grp === run.grp && other.lane === run.lane) &&
       claimed.filter((other) => other.grp === run.grp).length < groupLimit(run.grp) &&
-      (rule.maxActive === undefined || claimed.filter((other) => other.rule === run.rule).length < rule.maxActive) &&
+      (!rule ||
+        rule.maxActive === undefined ||
+        claimed.filter((other) => other.rule === run.rule).length < rule.maxActive) &&
       (agentLimit === undefined || claimed.filter((other) => other.agent === agent).length < agentLimit)
     );
   };
@@ -631,7 +921,7 @@ function claimNext(draft: Draft, worker: string, claim: string) {
 function stopRun(draft: Draft, run: Row, why: string, summary: string, words: string) {
   put(draft, "runs", run.id, { state: "cancelled", finished_at: draft.at, summary });
   closeStopped(draft, run.id, summary);
-  notify(draft, `run:${run.id}:${why}`, run.rule, words, threadOf(run));
+  notify(draft, `run:${run.id}:${why}`, run.rule, words, noticeTarget(draft, run));
   if (run.kind === "assess")
     markAssessmentUnavailable(draft, run, why === "rule-gone" ? "rule_gone" : "assessment_stopped");
 }
@@ -689,11 +979,14 @@ function retryLater(draft: Draft, run: Row, result: Result) {
     set(draft, "runs", other.id, null);
     if (other.resume) put(draft, "runs", id, { resume: other.resume });
   }
-  if (!result.notice?.some((notice) => !notice.fyi) && attempts === 3) {
+  if (!result.notice?.some((notice) => !notice.fyi)) {
     const clock = { timeZone: draft.rules.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" } as const;
     const time = new Intl.DateTimeFormat("zh-CN", clock).format(notBefore);
-    const words = `连续 3 次自动处理没跑完（卡在：${error}），${time} 会自动再试。`;
-    notify(draft, `run:${id}:failing`, run.rule, words, threadOf(run));
+    const words =
+      attempts === 1
+        ? `这一轮没跑完（卡在：${error}），${time} 会自动再试。`
+        : `连续 ${attempts} 次自动处理没跑完（卡在：${error}），${time} 会自动再试。`;
+    notify(draft, `run:${id}:failing`, run.rule, words, noticeTarget(draft, run));
   }
   if (!run.kind) assignQueued(draft, draft.view.get("runs", id)!);
   return rejected;
@@ -713,6 +1006,7 @@ function scheduleReview(draft: Draft, run: Row, later: Later) {
     session,
     agent: run.agent,
     hops: hopsOf(draft, run),
+    ...(replyOf(draft.view, run.id) && { reply: replyOf(draft.view, run.id) }),
   };
   if (existing) return void put(draft, "timers", existing.id, fields);
   const source = sourceOf(draft.view, run.id) ?? SCHEDULE;
@@ -835,7 +1129,15 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   for (const ask of result.ask ?? []) cardFromReceipt(draft, run, "ask", ask);
   for (const notice of result.notice ?? []) cardFromReceipt(draft, run, "notice", notice);
   if (rule?.tell === "always" && result.outcome === "done") {
-    const once = { fyi: true, once: true, ...threadOf(run), source: sourceOf(draft.view, id), run: id };
+    const reply = replyOf(draft.view, id);
+    const once = {
+      fyi: true,
+      once: true,
+      ...threadOf(run),
+      source: sourceOf(draft.view, id),
+      run: id,
+      ...(reply && { reply }),
+    };
     notify(draft, `run:${id}:done`, run.rule, summary, once);
   }
   for (const later of result.later ?? []) scheduleReview(draft, run, later);
@@ -868,6 +1170,19 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
     : run.usage;
   put(draft, "runs", id, { last_issued: run.issued, last_result: hash, issued: null, session, usage });
   let rejected: Rejected[] = [];
+  // A dispatcher round that did not finish has no retry: the event is recorded, and a person gets the card to place it.
+  if (run.kind === "dispatch" && result.outcome !== "done" && result.outcome !== "nothing") {
+    put(draft, "runs", id, {
+      state: result.outcome,
+      finished_at: draft.at,
+      summary: result.summary ?? "",
+      error: result.error ?? null,
+    });
+    const [event] = assessedEventsOf(draft, run);
+    if (event) unassigned(draft, event, run, `调度没跑成：${result.error ?? result.summary ?? "没有说明"}`);
+    put(draft, "runs", id, { last_answer: "[]" });
+    return { rejected: [] };
+  }
   // Told to stop, one that failed first has stopped all the same: trying again would start what the owner ended.
   if (result.outcome === "cancelled" || (result.outcome === "failed" && run.cancel_at)) {
     put(draft, "runs", id, {
@@ -880,6 +1195,7 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
     if (run.kind === "assess") markAssessmentUnavailable(draft, run, "assessment_cancelled");
   } else if (result.outcome === "failed") rejected = retryLater(draft, run, result);
   else if (run.kind === "assess") rejected = applyAssessment(draft, run, result);
+  else if (run.kind === "dispatch") rejected = applyRoute(draft, run, result);
   else if (run.kind === "speculate") rejected = applySpeculation(draft, run, result);
   else rejected = applyReceipt(draft, run, result);
   put(draft, "runs", id, { last_answer: JSON.stringify(rejected) });
@@ -913,9 +1229,38 @@ function answer(draft: Draft, id: number, given: Row) {
   const optionCount = JSON.parse(card.options).length;
   const inRange = Number.isInteger(given.choice) && given.choice >= 0 && given.choice < optionCount;
   if (given.choice === undefined ? !text : !inRange) throw new InputError("没有这个选项");
+  // A card the hub made to place an event is answered by the hub itself: the chosen project is checked and dispatched.
+  if (card.grp === "dispatch" && card.run_id !== null) {
+    const options: string[] = JSON.parse(card.options);
+    const choice = given.choice === undefined ? text : options[given.choice];
+    const run = draft.view.get("runs", card.run_id);
+    const [event] = run ? assessedEventsOf(draft, run) : [];
+    if (!event) throw new Conflict("这张卡片对应的事件已经不在了");
+    if (choice === "先放着") {
+      closeCard(draft, card, "先放着", given.by ?? null, text);
+      return { changed: true, state: "closed" };
+    }
+    if (choice === "知道了") {
+      closeCard(draft, card, "知道了", given.by ?? null, text);
+      return { changed: true, state: "closed" };
+    }
+    const project = choice ?? "";
+    if (!projectChoices(draft, event).includes(project)) throw new InputError("没有这个项目");
+    const problem = placeEvent(draft, event, project, "continue", "person");
+    if (problem) throw new Conflict(problem);
+    closeCard(draft, card, `已放到 ${project}`, given.by ?? null, text);
+    return { changed: true, state: "closed" };
+  }
   const rule = card.rule ? ruleNamed(draft, card.rule) : undefined;
   const { lane: subject, title: summary, hops = 0 } = card;
-  const event = { id: `card:${id}`, type: "card.answered", subject, summary, hops };
+  const event = {
+    id: `card:${id}`,
+    type: "card.answered",
+    subject,
+    summary,
+    hops,
+    ...(card.reply && { reply: card.reply }),
+  };
   const eventId = recordEvent(draft, card.source ?? SCHEDULE, event, rule ? [rule.name] : []);
   const decision = { choice: given.choice ?? null, answer: text, by: given.by ?? null, decided_at: draft.at };
   put(draft, "cards", id, { state: "decided", ...decision, answer_event: eventId, version: card.version + 1 });
@@ -987,7 +1332,13 @@ function tick(draft: Draft) {
   const due = rows(draft.view, "timers", { event_id: null }).filter((timer) => Date.parse(timer.at) <= now);
   for (const timer of due.sort((a, b) => a.at.localeCompare(b.at))) {
     const rule = ruleNamed(draft, timer.rule);
-    const event = { id: `timer:${timer.id}`, type: "timer.due", subject: timer.lane, hops: timer.hops ?? 0 };
+    const event = {
+      id: `timer:${timer.id}`,
+      type: "timer.due",
+      subject: timer.lane,
+      hops: timer.hops ?? 0,
+      ...(timer.reply && { reply: timer.reply }),
+    };
     const eventId = recordEvent(draft, timer.source, event, rule ? [rule.name] : []);
     put(draft, "timers", timer.id, { event_id: eventId });
     if (rule) {

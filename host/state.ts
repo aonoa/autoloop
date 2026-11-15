@@ -10,18 +10,19 @@ import { stagesOf } from "../kernel/stage.ts";
 
 /** The columns of the read-only SQL views over the projections, which the queries here read. */
 const VIEWS = {
-  events: "id source key type subject summary detail link actor matched routed dispatched paused refused received_at",
+  events:
+    "id source key type subject summary detail link actor reply matched routed dispatched paused refused received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
     "claimed_at seen_at finished_at manual summary error usage report",
   run_events: "run_id event_id context",
   cards:
     "id key kind title text options recommend about state fyi quiet choice answer by result rule lane grp source " +
-    "agent session run_id answer_event version created_at decided_at closed_at",
+    "agent session run_id answer_event version created_at decided_at closed_at reply",
   deliveries: "card_id channel version ref tries first_try_at not_before error given_up",
   decisions: "id event_id rule source actor state reason strength scope rules_version decided_at",
   mandates: "event_id rule strength reason scope rules_version granted_at",
-  timers: "id rule lane key source agent session about at event_id created_at",
+  timers: "id rule lane key source agent session about at event_id reply created_at",
   schedules: "rule cron next_at skipped_at",
   seen: "kind name seen_at",
   keys: "kind name hash created_at",

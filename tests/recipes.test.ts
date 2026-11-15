@@ -18,6 +18,7 @@ const RECIPES = join(ROOT, "examples", "recipes");
 const NAMES = [
   "morning-brief",
   "github-issues",
+  "github-multi-repo",
   "ops-alerts",
   "feedback",
   "website-watch",
@@ -57,6 +58,14 @@ for (const name of NAMES) {
 
   test(`${name}: every Skill a rule names is here, and the README says where it goes`, () => {
     const skills = readRules(name).rules.flatMap((rule: { skill?: string }) => rule.skill ?? []);
+    if (!skills.length) {
+      assert.doesNotMatch(
+        readDoc(name),
+        /~\/\.(?:codex|claude)\/skills\//,
+        "a recipe without a Skill shouldn't tell people to install one",
+      );
+      return;
+    }
     assert.equal(skills.length, 1);
     const skill = readFileSync(join(RECIPES, name, "SKILL.md"), "utf8");
     assert.match(skill, new RegExp(`^name: ${skills[0]}$`, "m"));
@@ -67,7 +76,8 @@ for (const name of NAMES) {
   test(`${name}: the README states the access level the rules actually give`, () => {
     const { agents } = readRules(name);
     const real = Object.values<{ use: string; access: string }>(agents).filter((agent) => agent.use !== "command");
-    assert.equal(real.length, 1);
+    assert.ok(real.length >= 1);
+    assert.equal(new Set(real.map((agent) => agent.access)).size, 1, "README 只写一个权限，规则里的真实 Agent 要一致");
     const stated = /权限：`(read|edit|full)`/.exec(readDoc(name));
     assert.ok(stated, "README 要写明权限");
     assert.equal(stated[1], real[0].access);
@@ -197,4 +207,44 @@ test("github-issues: the watcher's search is optional, and the rules use it to l
   assert.match(watch(["owner/repo", "created:>=2026-11-04"]).asked, /--search created:>=2026-11-04/);
   const { agents } = readRules("github-issues");
   assert.ok(agents.watcher.command.some((part: string) => part.startsWith("created:>=")));
+});
+
+test("github-multi-repo: each repository's event goes only to that repository's rule", async () => {
+  const home = mkdtempSync(join(scratch, "multi-"));
+  const port = await freePort();
+  const env = { AGENT_AUTOLOOP_HOME: home };
+  writeFileSync(join(home, "rules.json"), readFileSync(join(RECIPES, "github-multi-repo", "rules.json")));
+  const keys: Record<string, string> = {};
+  for (const source of ["github-app", "github-web"]) {
+    keys[source] = agentAutoloop(["key", "new", "source", source], env).stdout.trim().split("\n").at(-1)!;
+  }
+  const url = `http://127.0.0.1:${port}`;
+  writeFileSync(join(home, "config.json"), JSON.stringify({ url, hub: { listen: `127.0.0.1:${port}` } }));
+  const hub = spawn(
+    process.execPath,
+    ["--disable-warning=ExperimentalWarning", join(ROOT, "bin", "agent-autoloop.ts"), "up"],
+    { env: { ...cleanEnv(), ...env }, stdio: "ignore" },
+  );
+  try {
+    for (let tries = 0; tries < 100; tries++) {
+      const up = await fetch(`${url}/healthz`).catch(() => null);
+      if (up?.ok) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    for (const [source, file, rule] of [
+      ["github-app", "event-app.json", "app issue"],
+      ["github-web", "event-web.json", "web issue"],
+    ]) {
+      const sent = await fetch(`${url}/v1/events`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${keys[source]}`, "content-type": "application/json" },
+        body: readFileSync(join(RECIPES, "github-multi-repo", file)),
+      });
+      assert.equal(sent.status, 200);
+      assert.deepEqual((await sent.json()).routed, [rule]);
+    }
+  } finally {
+    hub.kill("SIGTERM");
+    await new Promise((resolve) => hub.once("exit", resolve));
+  }
 });

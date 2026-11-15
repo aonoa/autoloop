@@ -6,8 +6,9 @@ export type Job = {
   /**
    * `assess` is a round of the assessor Agent: it reads the event and answers with a verdict, doing no work.
    * `speculate` is a background try whose result is only delivered when it found something worth it.
+   * `dispatch` reads an event that matched no rule and answers with a route, doing no work.
    */
-  kind?: "assess" | "speculate";
+  kind?: "assess" | "speculate" | "dispatch";
   rule: Pick<Rule, "name" | "cwd" | "skill" | "prompt" | "title" | "emits">;
   /** How this rule's messages read where they land: a chat wants a sentence, a review wants a write-up. */
   style?: "im" | "async";
@@ -65,5 +66,21 @@ export type Job = {
     waiting: { key: string; about: string; at: string }[];
     open: { card: number; title: string; text: string; at: string }[];
     decided: { card: number; title: string; choice: string | null; at: string }[];
+    /** What a dispatcher may choose from: the hub's facts, never remembered by the model. Only for `dispatch` rounds. */
+    dispatch?: {
+      minConfidence: number;
+      projects: {
+        project: string;
+        rule: string;
+        cwd: string;
+        agent: string;
+        worker: string;
+        online: boolean;
+        subjects: string[];
+        aliases: string[];
+      }[];
+      matters: { project?: string; rule: string; lane: string; stage: string; lastRun: number }[];
+      recentRuns: { run: number; project?: string; rule: string; state: string; summary: string; at: string | null }[];
+    };
   };
 };

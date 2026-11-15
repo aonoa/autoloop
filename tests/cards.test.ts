@@ -117,6 +117,47 @@ test("an answer wakes the thread that asked, in its session, with what it left f
   assert.equal(card(id).version, before + 1);
 });
 
+test("a card from a private source carries its conversation through the answer and the follow-up", () => {
+  clean();
+  ingest("app", { ...note(3), reply: "qq-private-10001" }, at(0));
+  const first = claim("w1", at(0))!;
+  finish(first.run, first.token, { outcome: "done", ask: [question] }, at(1));
+  const asked = one<{ id: number; reply: string }>("SELECT id, reply FROM cards WHERE run_id = ?", [first.run])!;
+  assert.equal(asked.reply, "qq-private-10001");
+  answer(asked.id, { choice: 1, by: "me" }, at(2));
+  const second = claim("w1", at(2))!;
+  assert.equal(
+    one<{ reply: string }>("SELECT reply FROM events WHERE type = 'card.answered'")!.reply,
+    "qq-private-10001",
+  );
+  finish(
+    second.run,
+    second.token,
+    { outcome: "done", summary: "留着", later: [{ key: "again", at: new Date(at(60)).toISOString(), about: "再看" }] },
+    at(3),
+  );
+  const timer = one<{ reply: string }>("SELECT reply FROM timers")!;
+  assert.equal(timer.reply, "qq-private-10001");
+});
+
+test("a card on a project matter carries the lane a channel can name, and its answer stays on that matter", () => {
+  clean();
+  ingest("app", { ...note(4), subject: "qq-group-20002/shop" }, at(0));
+  const first = claim("w1", at(0))!;
+  started(first.run, first.token, { session: "s-4" }, at(1));
+  finish(first.run, first.token, { outcome: "done", ask: [question] }, at(1));
+  const asked = one<{ id: number }>("SELECT id FROM cards WHERE run_id = ?", [first.run])!;
+  const seen = nextCard("napcat", at(2))!;
+  assert.equal(seen.lane, "qq-group-20002/shop", "the chat can show which project is asking");
+  delivered("napcat", seen.id, seen.version, "napcat-card-1", at(2));
+  answer(asked.id, { choice: 1, by: "me" }, at(3));
+  assert.equal(
+    one<{ subject: string }>("SELECT subject FROM events WHERE type = 'card.answered'")!.subject,
+    "qq-group-20002/shop",
+  );
+  assert.equal(claim("w1", at(3))!.session, "s-4", "the answer continues the project's own session");
+});
+
 test("the answers material carries the chosen text so the 0-based choice can't be read as the first option", () => {
   clean();
   const { id } = asked(1);

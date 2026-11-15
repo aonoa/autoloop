@@ -16,11 +16,18 @@ export type Source = { name: string; adapter?: string; policy?: SourcePolicy };
  * model, through an ordinary round of the assessor Agent, before a rule takes an event.
  */
 export type Accept = "off" | "gate" | "assess";
+/**
+ * How an event that matched no rule is placed. Off by default: the hub records it as unrouted and does nothing else.
+ * With a dispatcher, a read-only round chooses a project (a rule with `project`) from the hub's facts; the hub then
+ * checks the choice before any work starts. A confidence below the threshold is left for a person, never guessed.
+ */
+export type Dispatch = { agent: string; minConfidence?: number };
 export type Policy = {
   accept: Accept;
   assessor?: string;
   /** Whether an event also reaches the live matters of other rules on the same subject, as context only. Off by default. */
   fanout?: boolean;
+  dispatch?: Dispatch;
 };
 type AgentOptions = {
   model?: string;
@@ -38,7 +45,12 @@ export type Agent = AgentOptions & { name: string; worker: string; use: string; 
 export type ChannelStyle = "im" | "async";
 export type Channel = { name: string; answerers?: string[]; links?: boolean; style?: ChannelStyle };
 export type Tell = "always" | "needed" | "never";
-type EventFilter = { source: string; types: string[] };
+type EventFilter = {
+  source: string;
+  types: string[];
+  /** Optional lane prefixes. A rule that names them only takes events whose subject matches one; absent means any. */
+  subjects?: string[];
+};
 type When = EventFilter | { cron: string };
 type RuleWords = { skill?: string; prompt?: string };
 /** A session's name for clients that take it from the first line: {subject} and {id} filled in by the worker. */
@@ -65,6 +77,8 @@ export type Rule = RuleOptions &
     /** The project this rule belongs to. It is a naming and grouping shorthand, not a runtime concept: `cwd` and `group`
      * still decide where work runs and how many run at once. */
     project?: string;
+    /** Other event subjects this project takes besides `when.subjects`; exact, or a prefix ending in `*`. */
+    aliases?: string[];
   };
 /** A scheduled task that runs elsewhere (say, in the Claude app): the hub neither starts nor records it. With a cwd it can
  * also ask, and your answer goes on there like a round of a rule. */
@@ -93,10 +107,21 @@ export type Rules = Registered & {
 /** The source of what the clock makes happen. */
 export const SCHEDULE = "schedule";
 
+/** The internal name of a dispatcher round. It is not a rule: no rule may be looked up by it. */
+export const DISPATCH_RULE = "__dispatch__";
+/** How a dispatcher round is named where a person reads it. */
+export const DISPATCH_NAME = "调度";
+
 function typeMatch(pattern: string, type: string) {
   return pattern === "*" || pattern === type || (pattern.endsWith(".*") && type.startsWith(pattern.slice(0, -1)));
 }
 export const typeMatches = (patterns: string[], type: string) => patterns.some((pattern) => typeMatch(pattern, type));
+/** A subject pattern is an exact lane, or a prefix ending in `*`; `/qq-group-1/shop*` covers a lane's answers too. */
+function subjectMatch(pattern: string, subject: string) {
+  return pattern.endsWith("*") ? subject.startsWith(pattern.slice(0, -1)) : subject === pattern;
+}
+export const subjectMatches = (patterns: string[] | undefined, subject: string) =>
+  !patterns?.length || patterns.some((pattern) => subjectMatch(pattern, subject));
 export const eventRule = (rule: Rule): rule is Rule & { when: EventFilter } => "source" in rule.when;
 export const cronOf = (rule: Rule) => (rule.when as { cron: string }).cron;
 

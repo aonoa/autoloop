@@ -278,10 +278,11 @@ test("a failed run comes back later with what came in meanwhile, in its own sess
   finish(job.run, job.token, { outcome: "failed", error: "没加载出工具" }, at(8));
   assert.equal(claim("w1", at(17)), null, "the second waits ten");
   job = claim("w1", at(18))!;
-  assert.deepEqual(told(), []);
+  assert.equal(told().length, 1, "the first failure is told at once");
+  assert.match(told()[0].text, /这一轮没跑完（卡在：没加载出工具）/);
   finish(job.run, job.token, { outcome: "failed", error: "没加载出工具" }, at(19));
-  assert.equal(told().length, 1);
-  assert.match(told()[0].text, /连续 3 次自动处理没跑完（卡在：没加载出工具），10:39 会自动再试/);
+  assert.equal(told().length, 1, "the same failure isn't told again while its card is open");
+  assert.match(told()[0].text, /这一轮没跑完（卡在：没加载出工具），\d\d:\d\d 会自动再试/);
   job = claim("w1", at(39))!;
   finish(job.run, job.token, { outcome: "failed", error: "还是不行" }, at(40));
   assert.equal(told().length, 1);
@@ -289,6 +290,25 @@ test("a failed run comes back later with what came in meanwhile, in its own sess
   job = claim("w1", at(80))!;
   finish(job.run, job.token, { outcome: "done", summary: "好了" }, at(81));
   assert.equal(told()[0].state, "closed", "once it has worked the failing card closes by itself");
+});
+
+test("a private chat's failures go back to that chat, not the channel's configured default", () => {
+  clean();
+  ingest("app", { ...note(1), reply: "qq-private-10001" }, at(0));
+  const job = claim("w1", at(0))!;
+  finish(job.run, job.token, { outcome: "failed", error: "没加载出工具" }, at(1));
+  const failing = one<{ key: string; reply: string }>("SELECT key, reply FROM cards WHERE key = ?", [
+    `run:${job.run}:failing`,
+  ])!;
+  assert.equal(failing.reply, "qq-private-10001", "the failing notice keeps the conversation it came from");
+
+  let attempt = job;
+  for (let failure = 2; failure <= 10; failure++) {
+    attempt = claim("w1", at(failure * 100))!;
+    finish(attempt.run, attempt.token, { outcome: "failed", error: "没加载出工具" }, at(failure * 100 + 1));
+  }
+  const stopped = one<{ reply: string }>("SELECT reply FROM cards WHERE key = ?", [`run:${job.run}:stopped`])!;
+  assert.equal(stopped.reply, "qq-private-10001", "the stopped notice keeps it too");
 });
 
 test("after ten failures in a row a run stops, tells the owner once, and newer events still get done", () => {
@@ -628,4 +648,36 @@ test("a run's usage and session are kept", () => {
   const row = one<{ session: string; usage: string }>("SELECT session, usage FROM runs WHERE id = ?", [job.run])!;
   assert.equal(row.session, "t-1");
   assert.deepEqual(JSON.parse(row.usage), { input: 100, output: 20, cached: 50, cost: 0.1 });
+});
+
+test("a rule that resumes keeps each topic on its own session, and a new one carries that topic's last", async () => {
+  clean();
+  const hub = await import("./hub.ts");
+  const before = hub.getView().get("config", "rules")!.value;
+  const next = structuredClone(before);
+  next.rules[0].parallel = 4;
+  next.rules[0].resume = true;
+  hub.execute("rules", [next], at(0));
+  try {
+    // A topic is a stable subject: every message about the shop has the same one.
+    const shopTopic = (n: number) => ({ ...note(n), subject: "chat/shop" });
+    const siteTopic = (n: number) => ({ ...note(n), subject: "chat/site" });
+    ingest("app", shopTopic(1), at(1));
+    ingest("app", siteTopic(2), at(2));
+    const shop = claim("w1", at(3))!;
+    const site = claim("w1", at(3))!;
+    assert.deepEqual([shop.context.events[0].subject, site.context.events[0].subject], ["chat/shop", "chat/site"]);
+    started(shop.run, shop.token, { session: "s-shop-1" }, at(4));
+    started(site.run, site.token, { session: "s-site-1" }, at(4));
+    finish(shop.run, shop.token, { outcome: "done", summary: "店铺好了" }, at(5));
+    finish(site.run, site.token, { outcome: "done", summary: "站点好了" }, at(5));
+
+    ingest("app", shopTopic(3), at(6));
+    const again = claim("w1", at(7))!;
+    assert.equal(again.context.events[0].subject, "chat/shop");
+    assert.equal(again.session, "s-shop-1", "the shop topic carries its own old session");
+    assert.notEqual(again.session, "s-site-1");
+  } finally {
+    hub.execute("rules", [before], at(8));
+  }
 });

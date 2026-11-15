@@ -1,0 +1,9 @@
+{
+  "id": "app-issue-7-opened",
+  "type": "issues.opened",
+  "subject": "owner/app#7",
+  "summary": "登录页在窄屏下错位",
+  "detail": "演示资料：在 320px 宽度下提交按钮超出容器。接入时换成真实 issue 正文。",
+  "link": "https://github.com/owner/app/issues/7",
+  "actor": "alice"
+}

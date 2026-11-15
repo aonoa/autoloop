@@ -42,6 +42,11 @@ test("wire schemas agree with event and receipt boundaries", () => {
     { id: "one", type: "app.changed", source: "other" },
     { id: 7, type: "invalid" },
     { id: "one", type: "bad type" },
+    { id: "one", type: "app.changed", reply: "qq-private-10001" },
+    { id: "one", type: "app.changed", reply: "qq-group-20002" },
+    { id: "one", type: "app.changed", reply: "qq-group-not-a-number" },
+    { id: "one", type: "app.changed", reply: "qq-private-not-a-number" },
+    { id: "one", type: "app.changed", reply: "https://evil.test" },
   ]) {
     let accepted = true;
     try {
@@ -94,6 +99,50 @@ test("usage must be an object of finite nonnegative amounts", () => {
     assert.throws(() => parseResult({ outcome: "done", usage }));
     assert.ok(checkSchema("result", { outcome: "done", usage }).length);
   }
+});
+
+test("the published schema carries dispatch rounds and routes", () => {
+  const job = {
+    run: 1,
+    token: "t",
+    attempt: 1,
+    kind: "dispatch",
+    rule: { name: "调度", cwd: "" },
+    agent: { id: "a1", name: "调度", use: "claude", access: "read" },
+    session: null,
+    askFirst: [],
+    context: {
+      events: [],
+      answers: [],
+      timers: [],
+      waiting: [],
+      open: [],
+      decided: [],
+      dispatch: {
+        minConfidence: 0.7,
+        projects: [
+          {
+            project: "mini",
+            rule: "QQ 任务 mini",
+            cwd: "~/mini",
+            agent: "a1",
+            worker: "w1",
+            online: true,
+            subjects: ["#mini*"],
+            aliases: [],
+          },
+        ],
+        matters: [{ project: "mini", rule: "QQ 任务 mini", lane: "", stage: "idle", lastRun: 2 }],
+        recentRuns: [{ run: 2, project: "mini", rule: "QQ 任务 mini", state: "done", summary: "做完了", at: null }],
+      },
+    },
+  };
+  assert.deepEqual(checkSchema("job", job), []);
+  const route = { outcome: "done", route: { project: "mini", session: "ask", confidence: 0.8 } };
+  assert.deepEqual(checkSchema("result", route), []);
+  assert.ok(
+    checkSchema("result", { outcome: "done", route: { project: "mini", session: "later", confidence: 2 } }).length,
+  );
 });
 
 test("timer timestamps are real calendar dates in the documented ISO format", () => {

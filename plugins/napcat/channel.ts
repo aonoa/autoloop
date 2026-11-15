@@ -3,10 +3,18 @@
 //   "channels": { "napcat": { "key": "…", "url": "http://127.0.0.1:3000",
 //                             "ws": "ws://127.0.0.1:3000", "user": "123456" } } in config.json
 //   "channels": { "napcat": { "name": "QQ（NapCat）", "answerers": ["123456"] } } in rules.json: who may answer.
-// Use "group": "GROUP_NUMBER" instead of "user" to send to a group; a card reaches exactly one of them.
+// `user` is the fallback for cards with no source conversation (tasks from elsewhere, the hub's own alerts). A card that
+// came from a QQ chat goes back to that chat instead: a private message to that person, a group message to that group.
+// Whoever may answer a group card is `answerers`; a private card is answered only by the person it reached.
 import type { Card, ChannelContext } from "../../host/channels.ts";
 
 type Target = { kind: "user" | "group"; id: string };
+
+/** A card's source conversation, when the source named one this channel can reach. */
+function replyTargetOf(card: Card): Target | null {
+  const match = /^qq-(private|group)-([1-9][0-9]*)$/.exec(card.reply ?? "");
+  return match ? { kind: match[1] === "group" ? "group" : "user", id: match[2] } : null;
+}
 
 /** The one person or group this channel reaches: sending to both would put the same card in two places. */
 function targetOf(options: Record<string, unknown>): Target {
@@ -21,6 +29,8 @@ function targetOf(options: Record<string, unknown>): Target {
 /** One card, as it looks now: numbered choices while open, what became of it after. */
 export function words(card: Card) {
   const rule = card.rule && card.rule !== card.title ? card.rule : "";
+  // A chat that carries several matters needs to say which one is asking; the source and number aren't for the reader.
+  const project = card.lane?.includes("/") ? (card.lane.split("/").at(-1)?.trim() ?? "") : "";
   const chosen = card.choice === null ? card.answer : card.options[card.choice];
   const outcome =
     card.state === "decided"
@@ -39,7 +49,16 @@ export function words(card: Card) {
           .map((option, index) => `#${index + 1}. ${option}`)
           .concat(card.options.length ? ["直接回复 #1、#2……选择其中一项。"] : [])
       : [];
-  return [card.title, rule ? `来源：${rule}` : "", card.text, outcome, note, ...choices, card.link ?? ""]
+  return [
+    card.title,
+    rule ? `来源：${rule}` : "",
+    project ? `项目：${project}` : "",
+    card.text,
+    outcome,
+    note,
+    ...choices,
+    card.link ?? "",
+  ]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -74,19 +93,28 @@ export function messageOf(message: unknown, raw = "") {
 type Reply = { text: string; reply: string; user: string; group: string; message: string };
 
 /** The reply that can answer this channel, or null for every other message, including another group's. */
-export function replyOf(event: any, target: Target): Reply | null {
+export function replyOf(
+  event: any,
+  target: Target,
+  extraUsers: Set<string> = new Set(),
+  extraGroups: Set<string> = new Set(),
+): Reply | null {
   if (event?.post_type !== "message" || String(event.self_id ?? "") === String(event.user_id ?? "")) return null;
-  if (target.kind === "group" ? event.message_type !== "group" : event.message_type !== "private") return null;
-  if (target.kind === "group" && String(event.group_id ?? "") !== target.id) return null;
-  if (target.kind === "user" && String(event.user_id ?? "") !== target.id) return null;
+  const group = event.message_type === "group";
+  if (event.message_type !== (group ? "group" : "private")) return null;
   const { text, reply } = messageOf(event.message, String(event.raw_message ?? ""));
-  return {
-    text,
-    reply,
-    user: String(event.user_id ?? ""),
-    group: String(event.group_id ?? ""),
-    message: String(event.message_id ?? ""),
-  };
+  const user = String(event.user_id ?? "");
+  const room = String(event.group_id ?? "");
+  const message = String(event.message_id ?? "");
+  if (group) {
+    // The configured group and any group a card was actually sent to; another group's `#1` is not this channel's.
+    if (target.kind === "group" ? room !== target.id && !extraGroups.has(room) : !extraGroups.has(room)) return null;
+    return { text, reply, user, group: room, message };
+  }
+  // A private target accepts its own person, anyone a card was actually sent to, and anyone else, so a mistaken `#1`
+  // can be told why it did nothing instead of vanishing. A group only reads its own members' words.
+  if (target.kind === "group" && !extraUsers.has(user)) return null;
+  return { text, reply, user, group: "", message };
 }
 
 export default async function napcat({ hub, options, log, signal }: ChannelContext) {
@@ -113,9 +141,9 @@ export default async function napcat({ hub, options, log, signal }: ChannelConte
   }
 
   const id = (value: string) => (/^[0-9]+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : value);
-  async function sendText(text: string) {
-    return call(target.kind === "group" ? "send_group_msg" : "send_private_msg", {
-      ...(target.kind === "group" ? { group_id: id(target.id) } : { user_id: id(target.id) }),
+  async function sendText(text: string, to: Target = target) {
+    return call(to.kind === "group" ? "send_group_msg" : "send_private_msg", {
+      ...(to.kind === "group" ? { group_id: id(to.id) } : { user_id: id(to.id) }),
       message: [{ type: "text", data: { text } }],
     });
   }
@@ -125,37 +153,68 @@ export default async function napcat({ hub, options, log, signal }: ChannelConte
   const sentBefore = new Set<number>();
   const open = new Map<number, string>();
   const cardsByMessage = new Map<string, number>();
+  // Which QQ a card went to: an answer must come from that same person, not merely quote a message id.
+  const owners = new Map<number, string>();
+  // A group card's conversation: a numbered reply there belongs to this chat, not to whichever private chat also has one.
+  const conversations = new Map<number, string>();
   function forget(card: number) {
     const message = open.get(card);
     if (message) cardsByMessage.delete(message);
     open.delete(card);
+    owners.delete(card);
+    conversations.delete(card);
   }
 
+  const where = (target: Target) => `${target.kind === "group" ? "group" : "private"}-${target.id}`;
+
   async function send(card: Card) {
-    const sent = await sendText(words(card));
+    const to = replyTargetOf(card) ?? target;
+    const sent = await sendText(words(card), to);
     const message = String(sent?.message_id ?? "");
     if (!message) throw new Error(`NapCat 没有确认消息发出：${JSON.stringify(sent).slice(0, 300)}`);
     sentBefore.add(card.id);
     if (card.state === "open") {
       open.set(card.id, message);
       cardsByMessage.set(message, card.id);
+      conversations.set(card.id, where(to));
+      if (to.kind === "user") owners.set(card.id, to.id);
     }
     return `napcat-card-${card.id}`;
+  }
+
+  /** The card a bare number in this conversation means: one waiting card, and only one, in that chat. A quoted message
+   * may name a card sent elsewhere: answering it is still refused, with a word to the person who tried. */
+  function cardIn(reply: Reply) {
+    if (reply.reply) return cardsByMessage.get(reply.reply);
+    const here = where(reply.group ? { kind: "group", id: reply.group } : { kind: "user", id: reply.user });
+    const waiting = [...open.keys()].filter((card) => (conversations.get(card) ?? "") === here);
+    // One card is waiting anywhere: a bare number means it, and the checks below say whether this person may answer it.
+    return waiting.length === 1 ? waiting[0] : open.size === 1 ? open.keys().next().value : undefined;
   }
 
   async function answer(reply: Reply) {
     const choice = choiceOf(reply.text);
     if (choice === null) return;
-    const card = reply.reply ? cardsByMessage.get(reply.reply) : open.size === 1 ? open.keys().next().value : undefined;
+    const card = cardIn(reply);
+    const here = where(reply.group ? { kind: "group", id: reply.group } : { kind: "user", id: reply.user });
+    const elsewhere = card !== undefined && conversations.has(card) && conversations.get(card) !== here;
+    if (card !== undefined && (elsewhere || (owners.has(card) && owners.get(card) !== reply.user))) {
+      await sendText("这张卡片不是发给你的，不能由你回答。", { kind: "user", id: reply.user }).catch((error) =>
+        log(`NapCat 没法提示怎么回答：${error}`),
+      );
+      return;
+    }
     if (card === undefined) {
       // A bare number can't choose between cards, and silence would make the person think it worked.
       await sendText(
         reply.reply
           ? "这条消息不是本通道发出的卡片，请引用卡片消息再回复。"
           : "有几张卡片在等回答，请引用要回答的那条消息，再回复 #1、#2……",
+        reply.group ? { kind: "group", id: reply.group } : { kind: "user", id: reply.user },
       ).catch((error) => log(`NapCat 没法提示怎么回答：${error}`));
       return;
     }
+    // The hub knows which channel this key belongs to, so it checks that channel's answerers.
     const result = await hub.answer(card, { choice, by: reply.user, ref: `napcat-card-${card}` });
     forget(card);
     log(`卡片 ${card}：${reply.user} 回复 ${reply.text.trim()}，${result?.changed ? "已记录" : "已经结束"}`);
@@ -180,7 +239,10 @@ export default async function napcat({ hub, options, log, signal }: ChannelConte
           log("NapCat 发来一段读不懂的数据");
           return;
         }
-        const reply = replyOf(payload, target);
+        const groups = new Set(
+          [...conversations.values()].filter((value) => value.startsWith("group-")).map((value) => value.slice(6)),
+        );
+        const reply = replyOf(payload, target, new Set(owners.values()), groups);
         if (reply) handling = handling.then(() => answer(reply)).catch((error) => log(`NapCat 回答没处理：${error}`));
       });
       // A stop may reset the socket on its way out. There is nothing left to reconnect then, and this must not become an
