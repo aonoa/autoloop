@@ -36,7 +36,8 @@ export type Hub = {
 
 type Submit = {
   action: "submit";
-  project: string;
+  project?: string;
+  project_hint?: string;
   text: string;
   target_session: string;
 };
@@ -53,20 +54,20 @@ export function instructions(config: Config) {
     .join("\n");
   const general = Object.hasOwn(config.projects, "general")
     ? `
-  - 与代码仓库无关的通用任务（天气、资料、新闻、计算、普通查询等）必须选 general；不要塞进 sub2api、foxcard 或其他代码项目。
-  - 只有明确涉及某个代码项目时才选对应项目；不确定时先问用户，禁止默认选列表里的第一个项目。`
+  - 明确是天气、资料、新闻、计算、普通查询这类与代码仓库无关的任务，可以选 general。
+  - 明确涉及某个代码项目时才选对应项目；不确定就省略 project_hint，交给 Autoloop 的调度 Agent 判断，不要默认选列表里的第一个项目。`
     : "";
   return `用于把人交代的工作交给 Agent Autoloop，并查询进度或回答它的提问。
 
 必须传 action，取值为 submit、status、answer、projects 之一。
 
 submit：提交一个新任务。
-  - project：项目短名，只能是下列之一（不是文件路径）：
+  - project_hint：可选的项目短名，只能是下列之一（不是文件路径）；拿不准时不要填，Autoloop 的调度 Agent 会判断：
 ${projects}${general}
   - text：任务原话，最多 4000 字。
   - target_session：从本轮 current_session 复制，规则见下节；服务会与应用注入的当前会话核对。
-  - 成功返回 run/project/target_session/routed，以及可直接发给用户的 ack 文案。
-  - 提交成功后，必须先把 ack 或等价的一句话发给用户，明确说明“已派单”、项目名和任务摘要；不要只调用 submit 就结束。
+  - 成功返回 run/target_session/routed，以及可直接发给用户的 ack 文案；没有 hint 时 project 可能为空，表示正在判断项目。
+  - 提交成功后，必须先把 ack 或等价的一句话发给用户；没有 hint 时说明“已提交，正在判断属于哪个项目”，不要说“没有规则接单”。
   - 如果当前消息不是任务，只是在聊天、确认、道谢，不要调用本 Activity，直接回复。
 
 status：查看进度。
@@ -243,14 +244,20 @@ export function replyOf(target: string) {
  * taken from model parameters. Treating a group id as a person would make Policy names and allowlists compare against
  * the wrong thing, and would let any group member inherit the bot's authority.
  */
-export function eventOf(target: string, project: string, text: string, actor: string, id: string = randomUUID()) {
+export function eventOf(
+  target: string,
+  project: string | undefined,
+  text: string,
+  actor: string,
+  id: string = randomUUID(),
+) {
   const detail = text.slice(0, MAX_TEXT);
   if (!detail.trim()) throw new Error("任务不能为空");
   if (!actor) throw new Error("allow.actor 不能为空");
   return {
     id: `insoulforge:${id}`,
     type: "qq.task",
-    subject: subjectOf(target, project),
+    subject: project ? subjectOf(target, project) : replyOf(target),
     summary: detail.slice(0, 200),
     detail,
     actor,
@@ -271,11 +278,13 @@ function number(value: any) {
 }
 
 function laneProject(lane: unknown) {
-  return typeof lane === "string" ? (lane.split("/").at(-1) ?? "") : "";
+  return typeof lane === "string" && lane.includes("/") ? (lane.split("/").at(-1) ?? "") : "";
 }
 
 function laneMatch(lane: unknown, target: string, project?: string) {
-  if (typeof lane !== "string" || !lane.startsWith(`qq-${target.replace(":", "-")}/`)) return false;
+  if (typeof lane !== "string") return false;
+  const conversation = `qq-${target.replace(":", "-")}`;
+  if (lane !== conversation && !lane.startsWith(`${conversation}/`)) return false;
   return !project || laneProject(lane) === project;
 }
 
@@ -283,9 +292,11 @@ function laneMatch(lane: unknown, target: string, project?: string) {
 export function statusOf(state: any, config: Config, target?: string, project?: string) {
   const allowedLanes = new Set<string>();
   for (const privateId of config.allow.private)
-    for (const name of Object.keys(config.projects)) allowedLanes.add(laneOf(`private:${privateId}`, name));
+    for (const name of ["", ...Object.keys(config.projects)])
+      allowedLanes.add(name ? laneOf(`private:${privateId}`, name) : replyOf(`private:${privateId}`));
   for (const groupId of config.allow.groups)
-    for (const name of Object.keys(config.projects)) allowedLanes.add(laneOf(`group:${groupId}`, name));
+    for (const name of ["", ...Object.keys(config.projects)])
+      allowedLanes.add(name ? laneOf(`group:${groupId}`, name) : replyOf(`group:${groupId}`));
   const visible = (lane: unknown) => typeof lane === "string" && allowedLanes.has(lane);
   const cards = (Array.isArray(state?.cards) ? state.cards : []).filter(
     (card: any) =>
@@ -304,12 +315,11 @@ export function statusOf(state: any, config: Config, target?: string, project?: 
   const lines = [
     `排队 ${active.filter((run: any) => run.state === "queued").length} 个，运行中 ${active.filter((run: any) => run.state === "claimed").length} 个，等待回答 ${cards.length} 张。`,
     ...cards.map((card: any) => `等待回答卡片 #${card.id}（${laneProject(card.lane)}/${card.title}）`),
-    ...active
-      .slice(0, MAX_RECENT)
-      .map(
-        (run: any) =>
-          `#${run.id} ${run.state === "claimed" ? "运行中" : "排队中"}：${run.summary || laneProject(run.lane) || run.rule}`,
-      ),
+    ...active.slice(0, MAX_RECENT).map((run: any) => {
+      const task = run.summary || laneProject(run.lane) || run.rule;
+      const step = Array.isArray(run.progress) ? run.progress.at(-1)?.step : "";
+      return `#${run.id} ${run.state === "claimed" ? "运行中" : "排队中"}：${task}${step ? `（进展：${step}）` : ""}`;
+    }),
     ...failed.map((run: any) => `#${run.id} 失败：${run.error || "没有说明"}`),
     ...done.map((run: any) => `#${run.id} 完成：${run.summary || "没有回执"}`),
   ];
@@ -324,7 +334,7 @@ export function statusOf(state: any, config: Config, target?: string, project?: 
       },
       cards: cards.map((card: any) => ({
         card: card.id,
-        project: laneProject(card.lane),
+        ...(laneProject(card.lane) && { project: laneProject(card.lane) }),
         lane: card.lane,
         title: card.title,
         text: card.text,
@@ -332,11 +342,12 @@ export function statusOf(state: any, config: Config, target?: string, project?: 
       })),
       runs: [...active, ...failed, ...done].slice(0, MAX_RECENT).map((run: any) => ({
         run: run.id,
-        project: laneProject(run.lane),
+        ...(laneProject(run.lane) && { project: laneProject(run.lane) }),
         lane: run.lane,
         state: run.state,
         summary: run.summary || "",
         error: run.error || "",
+        ...(Array.isArray(run.progress) && run.progress.length ? { progress: run.progress } : {}),
         createdAt: run.createdAt,
         finishedAt: run.finishedAt,
       })),
@@ -373,8 +384,10 @@ export function createService(config: Config, hub: Hub, log = (_line: string) =>
         return fail(String((error as Error).message));
       }
       if (!targetMatchesSession(target, context)) return fail("目标会话与本轮来源会话不一致");
-      const project = input.project;
-      if (typeof project !== "string" || !current.projects[project]) return fail("project 不在允许的项目里");
+      const project = input.project ?? input.project_hint;
+      if (project !== undefined && (typeof project !== "string" || !current.projects[project])) {
+        return fail("project_hint 不在允许的项目里");
+      }
       if (typeof input.text !== "string" || !input.text.trim()) return fail("text 不能为空");
       if ([...input.text].length > MAX_TEXT) return fail(`text 最多 ${MAX_TEXT} 字`);
       let sender: string;
@@ -389,7 +402,7 @@ export function createService(config: Config, hub: Hub, log = (_line: string) =>
         const ack: any = await hub.submit(event as unknown as Record<string, unknown>);
         const routed: string[] = Array.isArray(ack?.routed) ? ack.routed : [];
         let outcome: any = null;
-        if (Number.isInteger(ack?.event) && routed.length) {
+        if (Number.isInteger(ack?.event) && (routed.length || ack?.pending)) {
           try {
             outcome = await hub.outcome(ack.event);
           } catch (error) {
@@ -398,21 +411,28 @@ export function createService(config: Config, hub: Hub, log = (_line: string) =>
         }
         const run = Array.isArray(outcome?.runs) && outcome.runs.length === 1 ? outcome.runs[0] : null;
         const summary = event.summary;
+        const pending = ack?.pending === true || (!project && routed.length === 0 && ack?.event);
         const accepted = routed.length > 0;
-        const label = project === "general" ? "通用任务" : `项目：${project}`;
-        const text = accepted
-          ? `已派单给 Agent Autoloop（${label}${run ? `，任务 #${run.run}` : ""}）。任务：${summary}`
-          : `已提交给 Agent Autoloop，但没有规则接单（${label}）。任务：${summary}`;
-        log(`提交 ${event.id}：${target}/${project}，${routed.join("、") || "没有规则"}`);
+        const label = project === "general" ? "通用任务" : project ? `项目：${project}` : "项目：待判断";
+        const text = pending
+          ? `已提交给 Agent Autoloop，正在判断属于哪个项目。任务：${summary}`
+          : accepted
+            ? `已派单给 Agent Autoloop（${label}${run ? `，任务 #${run.run}` : ""}）。任务：${summary}`
+            : `已提交给 Agent Autoloop，但没有规则接单（${label}）。任务：${summary}`;
+        log(
+          `提交 ${event.id}：${target}/${project ?? "待判断"}，${routed.join("、") || (pending ? "待调度" : "没有规则")}`,
+        );
         return {
           success: true,
           result: {
             submitted: true,
             id: event.id,
-            project,
+            ...(project && { project }),
             target_session: target,
             routed,
             paused: ack?.paused ?? [],
+            pending,
+            ...(ack?.dispatch && { dispatch: ack.dispatch }),
             ...(run && { run: run.run, run_state: run.state }),
             summary,
             accepted,

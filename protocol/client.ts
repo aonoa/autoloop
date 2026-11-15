@@ -37,6 +37,8 @@ export function hubClient(url: string, key: string) {
     },
     started: (run: number, token: string, body: { session?: string; link?: string }) =>
       call("POST", `/v1/runs/${run}/started`, { token, body }),
+    progress: (run: number, token: string, body: { step: string; detail?: string; kind?: string; at?: string }) =>
+      call("POST", `/v1/runs/${run}/progress`, { token, body }),
     result: (run: number, token: string, body: unknown) => call("POST", `/v1/runs/${run}/result`, { token, body }),
     // The channel's door.
     nextCard: (wait: number) => call("GET", `/v1/cards/next?wait=${wait}`, { timeout: wait + 30 }),
@@ -55,6 +57,10 @@ export function hubClient(url: string, key: string) {
     state: (before?: number) => call("GET", before === undefined ? "/v1/state" : `/v1/state?before=${before}`),
     cancel: (run: number) => call("POST", `/v1/runs/${run}/cancel`, { body: {} }),
     resolve: (card: number, reason: string) => call("POST", `/v1/cards/${card}/resolve`, { body: { reason } }),
+    // Projects: the hub validates and writes rules.json together with the Activity list it is configured with.
+    projects: () => call("GET", "/v1/projects"),
+    addProject: (body: unknown) => call("POST", "/v1/projects", { body }),
+    removeProject: (project: string) => call("DELETE", `/v1/projects/${encodeURIComponent(project)}`),
     // Rule control: facts in the log, rules.json stays as the owner wrote it.
     pause: (rule: string, body: { reason?: string; until?: string } = {}) =>
       call("POST", `/v1/rules/${encodeURIComponent(rule)}/pause`, { body }),

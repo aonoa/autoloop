@@ -107,11 +107,11 @@
 
 `policy` 不写，或写 `"accept": "off"`，就与原来的 autoloop 完全一样：来源密钥验证通过、规则命中，就派活。`accept` 缺省也是 `off`；只写 `policy.fanout` 只开启扇出，不会开启 gate。开启后只收窄，不扩大：
 
-| `policy.accept` | 行为 |
-| --- | --- |
-| `off`（默认） | 来源密钥即授权，规则命中即派活 |
-| `gate` | 先过确定性检查：来源策略里的 `allowlist`、`admission`、`bots`；通过才写授权并派活 |
-| `assess` | 过 gate 后再排一轮研判，由 `policy.assessor` 指定的 Agent 判断这件事该不该接；`accept` 才派活 |
+| `policy.accept` | 行为                                                                                          |
+| --------------- | --------------------------------------------------------------------------------------------- |
+| `off`（默认）   | 来源密钥即授权，规则命中即派活                                                                |
+| `gate`          | 先过确定性检查：来源策略里的 `allowlist`、`admission`、`bots`；通过才写授权并派活             |
+| `assess`        | 过 gate 后再排一轮研判，由 `policy.assessor` 指定的 Agent 判断这件事该不该接；`accept` 才派活 |
 
 来源可以有自己的策略，身份只在本来源内比较，不同来源的账号不做映射：
 
@@ -167,13 +167,24 @@ POST /v1/events                    Authorization: Bearer <来源的密钥>
 - 没有规则匹配的事件也留着，`agent-autoloop status` 看得到。
 - 字段上限：`id` 200 个字、`subject` 100、`summary` 200、`detail` 4000、`link` 500，`type` 64 个字符。
 
-配置 `policy.dispatch` 后，没有匹配、也没有被 Policy 拒绝的外部事件会先排一轮 `kind: "dispatch"` 的只读调度轮。调度 Agent 只提交 `route`，由中台重新校验项目、来源、发送人、节点和置信度后，再走与普通事件相同的派发路径。未配置时行为不变：事件只记录，不自动放置。协议细节见[配置手册](configuration.md#调度-agentpolicydispatch)和[设计文档](design.md#dispatch调度-agent)。
+配置 `policy.dispatch` 后，没有匹配、也没有被 Policy 拒绝的**任务**外部事件会先排一轮 `kind: "dispatch"` 的只读调度轮。调度 Agent 提交 `route`，由中台重新校验项目、来源、发送人、节点和置信度后，再走与普通事件相同的派发路径；不是任务的聊天可以提交带 `"fyi": true` 的 `notice`，直接回到原会话，不启动项目轮次。未配置时行为不变：事件只记录，不自动放置。协议细节见[配置手册](configuration.md#调度-agentpolicydispatch)和[设计文档](design.md#dispatch调度-agent)。
+
+外部来源不必知道项目的规则、目录或节点。它只提交任务事实；需要判断项目时，事件应答带 `pending: true` 和 `dispatch`：
+
+```
+POST /v1/events
+{ "id": "chat:1", "type": "qq.task", "subject": "qq-private-10001", "summary": "查一下天气", "actor": "10001", "reply": "qq-private-10001" }
+→ 200 { "event": 35, "duplicate": false, "routed": [], "pending": true,
+        "dispatch": { "state": "queued", "run": 12 } }
+```
+
+`dispatch.state` 依次是 `queued`、`running`，可能经过 `creating`，最后是 `placed`、`replied`、`unassigned` 或 `failed`；`pending` 在 queued/running/creating 时为 true。等待调度或等待新建项目配置的事件不算“没有规则接”，`/v1/state` 的 `unrouted` 不列它，另在 `dispatching` 和 `totals.dispatching` 里显示。
 
 来源想知道发出去的事件后来怎么样了，用同一把密钥按应答里的 `event` 编号查，隔一段时间查一下还没结束的就行：
 
 ```
 GET /v1/events/34                  Authorization: Bearer <来源的密钥>
-→ 200 { "event": 34, "routed": ["处理意见"], "paused": [], "runs": [
+→ 200 { "event": 34, "routed": ["处理意见"], "paused": [], "dispatch": { "state": "placed", "run": 12, "project": "mini" }, "runs": [
     { "run": 41, "rule": "处理意见", "state": "done", "attempts": 0, "error": null,
       "finishedAt": "2026-11-07T08:00:00.000Z", "summary": "…", "events": [ { "id": "…", "type": "…", … } ] } ] }
 ```
@@ -222,7 +233,7 @@ POST /v1/tell    { "task": "每周清理", "ask": { "title", "text", "options": 
 
 `kind: "dispatch"` 的轮次读取一个未分配事件，只判断它属于哪个项目。Job 里带 `context.dispatch` 快照：
 
-- `projects`：本来源和事件类型能到达的项目、规则、`cwd`、Agent、节点、在线状态、`subjects`、`aliases`；
+- `projects`：本来源和事件类型能到达的项目、规则、`cwd`、Agent、节点、在线状态、`subjects`、`aliases`、`description`、最近一轮、能否续接会话、上次调度结果和本人纠正偏好；
 - `matters`：当前活跃事项及其阶段；
 - `recentRuns`：最近轮次摘要；
 - `minConfidence`：低于它不执行。
@@ -240,11 +251,14 @@ POST /v1/tell    { "task": "每周清理", "ask": { "title", "text", "options": 
 }
 ```
 
-- `session: "continue"` 接着同项目、同 lane 最近一次成功会话；
+- `session: "continue"` 接着同项目、同 lane 最近一次成功会话；会话还被别的轮占着、没有可续会话或 Agent 变了时，安全地新开；
 - `session: "new"` 开新会话，不并入已有 queued 轮；
 - `session: "ask"` 发项目选择卡，由人决定；
 - 项目不存在、来源/类型不匹配、发送人无权限、节点离线或置信度不足时，不派活，转成未分配卡片；
-- 调度失败或无 `route` 不会无限重试。
+- 开启 `policy.dispatch.create` 后，调度轮可以只提交 `create`，不能同时提交 `route` 或执行类动作。`create` 需要 `project`、`description` 和 0 到 1 的 `confidence`，可带绝对目录、已登记 Agent/节点和 `subjects`；中台校验通过后只记待办，宿主写入配置成功才重新调度；
+- 调度失败或无 `route` 不会无限重试；失败记为 `dispatch_state: "failed"`，并生成未分配卡片；
+- 不是任务时，可以只提交 `notice`，但必须带 `"fyi": true`；中台把第一条直接回到原会话。没有 `fyi` 的 `notice` 不当聊天回复，按未分配处理；
+- 调度轮不接受 `ask`、`resolve`、`later`、`events`，它们不会被执行。
 
 调度轮强制 `access: "read"`，但它不是操作系统级沙箱；`command` 类 Agent 的只读性由程序自身保证。
 
@@ -281,9 +295,12 @@ GET /v1/work?claim=<这次领活的编号>&wait=50&running=7,8&capacity=1    Aut
 
 ```
 POST /v1/runs/12/started   Authorization: Bearer <token>   { "session": "…", "link": "claude://…" }
+POST /v1/runs/12/progress  Authorization: Bearer <token>   { "step": "执行命令：npm test", "detail": "…", "kind": "command" }
 POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 → 200 { "rejected": [{ "card": 9, "reason": "不在本轮核对范围" }] }
 ```
+
+进度是一条只用于展示的事实：`step` 必填（1–500 字），`detail`、`kind`、`at` 可选；中台只接受本轮 token 和仍在 `claimed` 的轮次，不因它改变授权、排队或事项阶段。接单程序从 Codex/Claude 已有的流式输出中提取步骤，约每 5 秒最多上报一批，结束前强制冲刷最后一批；状态页和 `why` 读取最近记录，`/v1/state` 每轮最多带 20 条。进度里不要放密钥、完整命令输出或大段日志。
 
 ```jsonc
 // Result
@@ -382,7 +399,7 @@ GET /v1/cards/next?wait=50    Authorization: Bearer <通道的密钥>
 
 ```
 GET  /v1/state              Authorization: Bearer <本人的密钥>
-→ 200 { "seq", "totals", "cards", "recentCards", "agents", "channels", "sources", "lines", "pauses", "skipped", "elsewhere", "runs", "matters", "decisions", "mandates", "nextBefore", "hasMore", "unrouted", "spending", "timers", "now", "timezone" }
+→ 200 { "seq", "totals", "cards", "recentCards", "agents", "channels", "sources", "lines", "pauses", "skipped", "elsewhere", "runs", "matters", "decisions", "dispatchDecisions", "dispatchCorrections", "dispatchPreferences", "projectCreations", "dispatching", "mandates", "nextBefore", "hasMore", "unrouted", "spending", "timers", "now", "timezone" }
 
 POST /v1/cards/56/answer    { "choice": 1 } 或 { "text": "别的想法" }
 POST /v1/cards/56/resolve   { "reason": "不用决定了，因为……" }
@@ -393,15 +410,15 @@ POST /v1/runs/12/cancel     {}
 
 `matters` 是还在办的事项及其阶段，新的在前。已结束、只剩等待报告且没有排队轮次、没有未结卡片、没有未来复查的事项不列出来。阶段按下面的表自上而下先匹配先得：
 
-| 阶段 | 含义 |
-| --- | --- |
-| `person/delivery` | 卡片发送失败，正在重试；输入还没送到人手里 |
-| `person/answer` | 有未回答的提问 |
-| `person/review` | 最近一轮报告 `ready`，等人审阅 |
-| `person/blocked` / `person/failed` | 最近一轮报告受阻/失败，此后本人没有回答或结案 |
-| `working/queued` | 有排队的轮次，或还没开始过 |
-| `working` | 正在执行、结果暂时不明，或最近一轮报告 `progress`（还在做，稍后会再交结果） |
-| `idle` | 这一轮结束了，没有别的在办动作 |
+| 阶段                               | 含义                                                                        |
+| ---------------------------------- | --------------------------------------------------------------------------- |
+| `person/delivery`                  | 卡片发送失败，正在重试；输入还没送到人手里                                  |
+| `person/answer`                    | 有未回答的提问                                                              |
+| `person/review`                    | 最近一轮报告 `ready`，等人审阅                                              |
+| `person/blocked` / `person/failed` | 最近一轮报告受阻/失败，此后本人没有回答或结案                               |
+| `working/queued`                   | 有排队的轮次，或还没开始过                                                  |
+| `working`                          | 正在执行、结果暂时不明，或最近一轮报告 `progress`（还在做，稍后会再交结果） |
+| `idle`                             | 这一轮结束了，没有别的在办动作                                              |
 
 受阻/失败后，定时、复查和自动事件都不会再派新活；本人回答卡片、结案，或手动运行后才会接着走。`decisions` 是最近的决定，`mandates` 是有效授权，都只读；它们是全局最近的记录，不随 `?before=` 翻轮次而清空。
 

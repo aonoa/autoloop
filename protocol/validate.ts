@@ -41,6 +41,7 @@ export type Result = {
   report?: Report;
   verdict?: Verdict;
   route?: Route;
+  create?: Create;
   ask?: Ask[];
   notice?: Notice[];
   resolve?: { card: number; reason: string }[];
@@ -48,12 +49,60 @@ export type Result = {
   events?: EventInput[];
 };
 
+/** A step an agent reports while it is still working. It is progress, never authority: the hub only records it. */
+export type Progress = { at?: string; step: string; detail?: string; kind?: string };
+
+const PROGRESS_STEP = 500;
+const PROGRESS_DETAIL = 4000;
+
+export function parseProgress(input: unknown): Progress {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new InputError("进度要是一个 JSON 对象");
+  }
+  const given = input as Record<string, unknown>;
+  for (const name of Object.keys(given)) {
+    if (!["at", "step", "detail", "kind"].includes(name)) throw new InputError(`不认识的进度字段：${name}`);
+  }
+  const step = given.step;
+  if (typeof step !== "string" || !step.trim() || [...step].length > PROGRESS_STEP) {
+    throw new InputError(`step 要是 1 到 ${PROGRESS_STEP} 个字的文字`);
+  }
+  const detail = given.detail;
+  if (detail !== undefined && (typeof detail !== "string" || [...detail].length > PROGRESS_DETAIL)) {
+    throw new InputError(`detail 最多 ${PROGRESS_DETAIL} 个字`);
+  }
+  const kind = given.kind;
+  if (kind !== undefined && (typeof kind !== "string" || [...kind].length > 40)) {
+    throw new InputError("kind 最多 40 个字");
+  }
+  const at = given.at;
+  if (at !== undefined && (typeof at !== "string" || !dateTime(at))) {
+    throw new InputError("at 要是带时区的时间");
+  }
+  return {
+    step: step.trim(),
+    ...(detail !== undefined && { detail: detail as string }),
+    ...(kind !== undefined && { kind: kind as string }),
+    ...(at !== undefined && { at: at as string }),
+  };
+}
+
 /** A dispatcher's placement of an unplaced event. The hub checks the project, its rule and the sender before using it. */
 export type Route = {
   project: string;
   session: "continue" | "new" | "ask";
   confidence: number;
   reason?: string;
+};
+/** A dispatcher's request for a project that does not exist yet. The hub checks it and the host writes the configuration. */
+export type Create = {
+  project: string;
+  description: string;
+  confidence: number;
+  cwd?: string;
+  agent?: string;
+  worker?: string;
+  subjects?: string[];
 };
 export type Rejected = { card?: number; what?: string; reason: string };
 
@@ -183,6 +232,29 @@ const validVerdict = (verdict: unknown): boolean => {
 };
 
 const SESSIONS = ["continue", "new", "ask"];
+const PROJECT_ID = /^[A-Za-z0-9._-]{1,40}$/;
+const validCreate = (create: unknown): boolean => {
+  if (!isItem(create)) return false;
+  const item = create as Item;
+  return (
+    only(item, ["project", "description", "confidence", "cwd", "agent", "worker", "subjects"]) &&
+    typeof item.project === "string" &&
+    PROJECT_ID.test(item.project) &&
+    text(item.description, 1000) &&
+    typeof item.confidence === "number" &&
+    Number.isFinite(item.confidence) &&
+    item.confidence >= 0 &&
+    item.confidence <= 1 &&
+    optional(item.cwd, 300) &&
+    optional(item.agent, 100) &&
+    optional(item.worker, 100) &&
+    (item.subjects === undefined ||
+      (Array.isArray(item.subjects) &&
+        item.subjects.length > 0 &&
+        item.subjects.length <= 100 &&
+        item.subjects.every((subject) => text(subject, 300))))
+  );
+};
 const validRoute = (route: unknown): boolean => {
   if (!isItem(route)) return false;
   const item = route as Item;
@@ -243,6 +315,7 @@ export function parseResult(input: unknown): Result {
       "report",
       "verdict",
       "route",
+      "create",
     ])
   ) {
     throw new InputError("结果里有不认识的字段");
@@ -273,6 +346,11 @@ export function parseResult(input: unknown): Result {
   if (result.route !== undefined && !validRoute(result.route)) {
     throw new InputError(
       "route 要有 project、session（continue、new、ask）、0 到 1 的 confidence，reason 最多 1000 字",
+    );
+  }
+  if (result.create !== undefined && !validCreate(result.create)) {
+    throw new InputError(
+      "create 要有 project（字母、数字和 . _ -）、description 和 0 到 1 的 confidence，cwd、agent、worker、subjects 可选且不与其他字段混用",
     );
   }
   if (result.events !== undefined) {

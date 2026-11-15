@@ -78,6 +78,7 @@ test("an unrouted event gets a read-only dispatch round that names only the proj
   h.act("heartbeat", "w2", []);
   const job = h.act("claimNext", "w1", "c1");
   assert.equal(job.kind, "dispatch");
+  assert.equal(job.rule.cwd, "~");
   assert.equal(job.agent.access, "read");
   assert.equal(job.agent.id, "a1");
   assert.deepEqual(job.context.dispatch!.projects.map((one: any) => one.project).sort(), ["mini", "shop"]);
@@ -362,6 +363,34 @@ test("a dispatcher cannot put new work into a project that is waiting on a perso
   assert.match(rows(h.view(), "cards", { state: "open" }).at(-1)!.text, /不能接新活/);
 });
 
+test("a project placed in a conversation lane is still checked for a waiting person", () => {
+  const h = hub(routing());
+  h.act("heartbeat", "w1", []);
+  h.act("heartbeat", "w2", []);
+  h.send({ subject: "somewhere-else", actor: "alice", summary: "先做这件" });
+  const first = h.act("claimNext", "w1", "c1");
+  h.act("finish", first.run, first.token, {
+    outcome: "done",
+    route: { project: "mini", session: "new", confidence: 0.99 },
+  });
+  const blocked = h.act("claimNext", "w1", "c2");
+  assert.equal(rows(h.view(), "runs", { id: blocked.run })[0].lane, "somewhere-else/mini");
+  h.act("finish", blocked.run, blocked.token, {
+    outcome: "done",
+    report: { state: "blocked", note: "等账号权限" },
+  });
+
+  h.send({ subject: "somewhere-else", actor: "alice", summary: "再塞一件" });
+  const dispatch = h.act("claimNext", "w1", "c3");
+  h.act("finish", dispatch.run, dispatch.token, {
+    outcome: "done",
+    route: { project: "mini", session: "continue", confidence: 0.99 },
+  });
+  assert.equal(rows(h.view(), "runs", { rule: "QQ 任务 mini", state: "queued" }).length, 0);
+  assert.equal(rows(h.view(), "events").at(-1)!.dispatch_state, "unassigned");
+  assert.match(rows(h.view(), "cards", { state: "open" }).at(-1)!.text, /不能接新活/);
+});
+
 test("an alias cannot bypass a project that is waiting on a person", () => {
   const h = hub(routing());
   h.act("heartbeat", "w1", []);
@@ -396,6 +425,6 @@ test("a real rule named 调度 is not mistaken for the internal dispatch round",
   const dispatch = h.act("claimNext", "w1", "c1");
   assert.equal(dispatch.kind, "dispatch");
   assert.equal(dispatch.rule.name, "调度", "a person still reads the dispatcher by its name");
-  assert.equal(dispatch.rule.cwd, "", "the internal round takes no directory from a user rule");
+  assert.equal(dispatch.rule.cwd, "~", "the internal round uses a safe directory, not the user rule's");
   assert.equal(dispatch.thread, undefined, "the internal round names no user matter");
 });

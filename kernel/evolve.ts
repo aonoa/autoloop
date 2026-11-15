@@ -5,9 +5,14 @@ export const TABLES = [
   "events",
   "runs",
   "run_events",
+  "run_progress",
   "cards",
   "deliveries",
   "decisions",
+  "dispatch_decisions",
+  "dispatch_corrections",
+  "dispatch_preferences",
+  "project_creations",
   "mandates",
   "timers",
   "schedules",
@@ -21,11 +26,26 @@ export type Table = (typeof TABLES)[number];
 export type Change = { table: Table; key: string; row: Row | null };
 export type Fact = { version: 1; seq: number; at: number; type: string; changes: Change[]; meta?: Row };
 export type Match = Record<string, SQLInputValue | SQLInputValue[] | { not: null }>;
-const NUMBERED = new Set<Table>(["events", "runs", "cards", "timers", "decisions"]);
+const NUMBERED = new Set<Table>([
+  "events",
+  "runs",
+  "run_progress",
+  "cards",
+  "timers",
+  "decisions",
+  "dispatch_decisions",
+  "dispatch_corrections",
+  "dispatch_preferences",
+  "project_creations",
+]);
 const indexes: Partial<Record<Table, string[][]>> = {
   events: [["source", "key"], ["matched", "id"], ["routed", "id"], ["paused", "id"], ["id"]],
   runs: [["state", "id"], ["rule", "lane", "state", "id"], ["id"], ["finished_at"]],
   run_events: [["run_id"], ["event_id"]],
+  run_progress: [
+    ["run_id", "at", "id"],
+    ["run_id", "id"],
+  ],
   cards: [
     ["key", "id"],
     ["state", "id"],
@@ -43,6 +63,10 @@ const indexes: Partial<Record<Table, string[][]>> = {
   ],
   deliveries: [["channel"], ["card_id"]],
   decisions: [["event_id"], ["state"], ["source"]],
+  dispatch_decisions: [["event_id"], ["dispatch_run"], ["project"], ["outcome"]],
+  dispatch_corrections: [["event_id"], ["suggested"], ["chosen"]],
+  dispatch_preferences: [["project", "source", "actor"]],
+  project_creations: [["event_id"], ["project"], ["state"]],
   mandates: [["event_id"], ["rule"], ["granted_at"]],
   due: [["at"]],
 };
@@ -182,6 +206,7 @@ export class View {
 export function keyOf(table: Table, row: Row): string {
   if (NUMBERED.has(table)) return String(row.id);
   if (table === "run_events") return `${row.run_id}:${row.event_id}`;
+  if (table === "run_progress") return String(row.id);
   if (table === "deliveries") return `${row.card_id}:${row.channel}`;
   if (table === "schedules") return row.rule;
   if (table === "mandates") return `${row.event_id}:${row.rule}`;

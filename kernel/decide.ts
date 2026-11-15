@@ -9,6 +9,7 @@ import {
   agentsOf,
   cardView,
   configuration,
+  dispatchOf,
   dispatchSnapshot,
   eventsOf,
   jobOf,
@@ -42,6 +43,7 @@ import {
   ANSWER_TEXT,
   DELIVERY_REF,
   parseEvent,
+  parseProgress,
   parseResult,
   type Later,
   type Rejected,
@@ -290,6 +292,7 @@ function recordEvent(
     ...(paused.length && { paused: JSON.stringify(paused) }),
     // Through the source's own door: only these are its to read back (`eventOutcome`), not what the hub made in its name.
     ...(sent && { sent: 1 }),
+    ...nulls("dispatch_run", "dispatch_state", "dispatch_project"),
     received_at: draft.at,
   }).id;
 }
@@ -297,11 +300,15 @@ function recordEvent(
 /** Whether an event came from outside. A rule's own emits are authorized by that rule, not by the source's policy. */
 type Origin = "external" | "rule";
 
+/** Notifications and answers report on work; they are never tasks and never need a project. */
+const isTaskEvent = (type: string) =>
+  !["card.answered", "timer.due", "schedule.tick", "run.manual"].includes(type) && !type.startsWith("notice.");
+
 function ingest(draft: Draft, source: string, given: unknown, sent = false, origin: Origin = "external") {
   const event = parseEvent(given);
   const existing = rows(draft.view, "events", { source, key: event.id })[0];
   if (existing) {
-    return { event: existing.id, duplicate: true, ...routingOf(existing) };
+    return { event: existing.id, duplicate: true, ...routingOf(existing), ...dispatchOf(existing) };
   }
   const tooDeep = event.hops > MAX_HOPS;
   const takes = (rule: Rule) =>
@@ -364,20 +371,25 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false, orig
   // sees what is left, and it never sees an event a policy refused.
   const eventRow = draft.view.get("events", id)!;
   const alias = !matched.length && !tooDeep && origin === "external" ? byAlias(draft, eventRow) : undefined;
+  let dispatchRun: number | null = null;
   if (alias) {
     // An alias is still an automatic external event: it must not wake a matter that is waiting for a person.
     const run = enqueue(draft, alias, id, alias.parallel ? event.subject : "", null, false);
     const admission = routeAdmission(draft, eventRow, alias);
-    if (run !== null) dispatch(draft, id, alias, admission, alias.project);
+    if (run !== null) {
+      dispatch(draft, id, alias, admission, alias.project);
+      put(draft, "events", id, { dispatch_state: "placed", dispatch_project: alias.project });
+    }
     if (run !== null) dispatched.push(alias.name);
   } else if (
     !matched.length &&
     origin === "external" &&
+    isTaskEvent(event.type) &&
     draft.rules.policy?.dispatch &&
     !tooDeep &&
     sourceAdmitsActor(draft, eventRow)
   ) {
-    enqueueDispatch(draft, id, source);
+    dispatchRun = enqueueDispatch(draft, id, source);
   }
   // Only an event a rule took may become context: a refused event stays out of every live matter too.
   if (draft.rules.policy?.fanout && event.subject && dispatched.length)
@@ -387,6 +399,7 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false, orig
     duplicate: false,
     routed: dispatched,
     paused,
+    ...(dispatchRun !== null && { dispatch: { state: "queued", run: dispatchRun }, pending: true }),
     ...(refused.length && { refused }),
   };
 }
@@ -580,6 +593,41 @@ function projectRule(draft: Draft, project: string, source: string, type: string
   );
 }
 
+const CREATE_ID = /^[A-Za-z0-9._-]{1,40}$/;
+const CREATE_FOLDER = /^(~[/\\]|\/|[a-z]:[/\\]|\\\\[^\\]+\\[^\\]+)/i;
+
+/** Why a project the dispatcher wants to create cannot be created, or null when the hub can ask the host to write it. */
+function creationProblem(draft: Draft, event: Row, create: NonNullable<Result["create"]>) {
+  if (!draft.rules.policy?.dispatch?.create) return "没有开启自动创建项目";
+  const minConfidence = draft.rules.policy.dispatch.minConfidence ?? 0.7;
+  if (create.confidence < minConfidence) return `新建项目的置信度 ${create.confidence} 低于 ${minConfidence}`;
+  if (!CREATE_ID.test(create.project)) return "新项目名只能用字母、数字和 . _ -，最多 40 个字符";
+  if (draft.rules.rules.some((rule) => rule.project === create.project)) return `项目「${create.project}」已经存在`;
+  if (rows(draft.view, "project_creations", { project: create.project, state: "pending" }).length)
+    return `项目「${create.project}」已经有待写入的创建提议`;
+  if (create.cwd && !CREATE_FOLDER.test(create.cwd)) return "新项目目录要是绝对目录（如 ~/code、/srv/app）";
+  const allowed = draft.rules.policy.dispatch.workers;
+  const agents = Object.entries(draft.rules.agents);
+  const agent = create.agent ? draft.rules.agents[create.agent] : undefined;
+  if (create.agent && !agent) return `没有 Agent：${create.agent}`;
+  if (create.worker) {
+    const candidates = agents.filter(([, one]) => one.worker === create.worker);
+    if (!candidates.length) return `没有节点 ${create.worker}`;
+    if (agent && agent.worker !== create.worker) return `Agent ${create.agent} 不在节点 ${create.worker}`;
+  }
+  if (!create.worker && !agent && !agents.length) return "没有可用的 Agent";
+  // The host may choose the default Agent when the proposal names neither one nor a node. Check that final placement, not
+  // just an explicitly named worker, so a whitelist cannot be bypassed by omitting both fields.
+  const fallback = create.worker
+    ? undefined
+    : (agent ?? agents.find(([id]) => id === "general")?.[1] ?? agents[0]?.[1]);
+  const worker = create.worker ?? fallback?.worker;
+  if (allowed?.length && (!worker || !allowed.includes(worker)))
+    return worker ? `节点 ${worker} 不在自动创建项目的允许列表里` : "自动创建项目没有可用的节点";
+  if (!event.source) return "找不到来源";
+  return null;
+}
+
 /** A round of the dispatcher Agent: it reads an unplaced event and answers with a route, and does no work. */
 function enqueueDispatch(draft: Draft, eventId: number, source: string) {
   const agent = draft.rules.policy?.dispatch?.agent;
@@ -599,11 +647,28 @@ function enqueueDispatch(draft: Draft, eventId: number, source: string) {
     rules_version: draft.view.get("config", "rules")!.version,
   });
   put(draft, "run_events", `${run.id}:${eventId}`, { run_id: run.id, event_id: eventId });
+  put(draft, "events", eventId, { dispatch_run: run.id, dispatch_state: "queued" });
   return run.id as number;
 }
 
+/** A project the dispatcher proposed, after the host has written it: the event goes back through the dispatcher. */
+function createdProject(draft: Draft, eventId: number, project: string) {
+  const event = draft.view.get("events", eventId);
+  if (!event || event.dispatch_state !== "creating") return;
+  put(draft, "events", eventId, { dispatch_state: "queued", dispatch_project: project });
+  const run = enqueueDispatch(draft, eventId, event.source);
+  if (run !== null) put(draft, "events", eventId, { dispatch_run: run, dispatch_state: "queued" });
+}
+
+/** Every lane that may hold this project's work for this event: the raw subject and the lane a placement would use. */
+function placementLanes(rule: Rule, event: Row) {
+  return [
+    ...new Set([rule.parallel ? event.subject : "", placedLane({ ...rule, parallel: rule.parallel ?? 1 }, event)]),
+  ];
+}
+
 /** Why a project cannot take this event: the hub's answer, never the model's word. */
-function placementProblem(draft: Draft, event: Row, project: string) {
+function placementProblem(draft: Draft, event: Row, project: string, lanes?: string[]) {
   const rule = projectRule(draft, project, event.source, event.type);
   if (!rule) return `项目「${project}」没有能接这个来源和类型的规则`;
   const agent = draft.rules.agents[rule.to];
@@ -611,9 +676,11 @@ function placementProblem(draft: Draft, event: Row, project: string) {
   if (!workerOnline(draft.view, agent.worker, draft.now))
     return `项目「${project}」所在的节点 ${agent.worker} 没上线或已离线`;
   if (routeAdmission(draft, event, rule).state === "ignore") return "这件事的发送人没有权限放进这个项目";
-  const lane = rule.parallel ? event.subject : "";
-  const stage = stageOf(draft.view, draft.rules, rule.name, lane, draft.now);
-  if (stage === "person/blocked" || stage === "person/failed") return `项目「${project}」现在在等人处理，不能接新活`;
+  const blocked = (lanes ?? placementLanes(rule, event)).some((lane) => {
+    const stage = stageOf(draft.view, draft.rules, rule.name, lane, draft.now);
+    return stage === "person/blocked" || stage === "person/failed";
+  });
+  if (blocked) return `项目「${project}」现在在等人处理，不能接新活`;
   return null;
 }
 
@@ -621,7 +688,8 @@ function placementProblem(draft: Draft, event: Row, project: string) {
 function routeProblem(draft: Draft, run: Row, route: NonNullable<Result["route"]>) {
   const [event] = assessedEventsOf(draft, run);
   if (!event) return "找不到要分配的事件";
-  return placementProblem(draft, event, route.project);
+  const rule = projectRule(draft, route.project, event.source, event.type);
+  return placementProblem(draft, event, route.project, rule ? placementLanes(rule, event) : undefined);
 }
 
 /** The projects a person may choose for an event: those whose rules can take it and whose source admits it. */
@@ -655,8 +723,89 @@ function askPlacement(draft: Draft, event: Row, run: Row, title: string, why: st
     lane: event.subject,
     grp: "dispatch",
     run_id: run.id,
+    ...(event.reply && { reply: event.reply }),
     about: `调度事件 ${event.id}`,
   });
+}
+
+/** The lane a placed event belongs to. A conversation-only subject is split by project, so two projects never share one. */
+function placedLane(rule: Rule, event: Row) {
+  if (!rule.parallel) return "";
+  if (!rule.project) return event.subject;
+  return event.subject.endsWith(`/${rule.project}`) ? event.subject : `${event.subject}/${rule.project}`;
+}
+
+/** The session a dispatcher's `continue` may safely take, and why. A session another live round holds is never reused. */
+function continuation(draft: Draft, rule: Rule, lane: string) {
+  const [last] = rows(draft.view, "runs", { rule: rule.name, lane, state: ["done", "nothing"] }, 1, true);
+  if (!last?.session) return { resume: undefined, why: "没有可续的会话，开新会话" };
+  if (last.agent !== rule.to) return { resume: undefined, why: "上次是别的 Agent 跑的，开新会话" };
+  const busy = rows(draft.view, "runs", { rule: rule.name, lane, state: ["queued", "claimed", "unknown"] }).some(
+    (run) => (run.session ?? run.resume) === last.session,
+  );
+  if (busy) return { resume: undefined, why: "上次的会话还被别的轮占着，开新会话" };
+  return { resume: last.session, why: "接着上次成功的会话" };
+}
+
+/** One structured record for a dispatcher round. The model's route is a suggestion; this is the hub's own outcome. */
+function recordDispatch(
+  draft: Draft,
+  run: Row,
+  event: Row,
+  outcome: "placed" | "unassigned" | "replied" | "failed",
+  route?: Result["route"],
+  why?: string,
+) {
+  const candidates = projectChoices(draft, event);
+  add(draft, "dispatch_decisions", {
+    event_id: event.id,
+    dispatch_run: run.id,
+    source: event.source,
+    actor: event.actor ?? "",
+    snapshot_version: draft.view.get("config", "rules")!.version,
+    candidates: JSON.stringify(candidates),
+    ...(route?.project && { project: route.project }),
+    ...(route?.session && { session: route.session }),
+    ...(route && { confidence: route.confidence }),
+    reason: why ?? route?.reason ?? "",
+    outcome,
+    created_at: draft.at,
+  });
+  put(draft, "events", event.id, {
+    dispatch_run: run.id,
+    dispatch_state: outcome,
+    ...(outcome === "placed" && route?.project && { dispatch_project: route.project }),
+  });
+}
+
+/** A dispatcher's direct answer to a non-task. It goes back to the conversation, and it starts no work. */
+function directReply(draft: Draft, run: Row, event: Row, notices: Result["notice"] = []) {
+  const reply = event.reply ? { reply: event.reply } : {};
+  for (const notice of notices.slice(0, 1)) {
+    notify(draft, `dispatch:${event.id}:reply`, notice.title, notice.text, {
+      fyi: true,
+      source: event.source,
+      lane: event.subject,
+      ...reply,
+    });
+  }
+  recordDispatch(draft, run, event, "replied", undefined, "直接回复");
+}
+
+/** Tell the original conversation where a placed task went, once the hub has actually accepted it. */
+function placedNotice(draft: Draft, event: Row, project: string) {
+  notify(
+    draft,
+    `dispatch:${event.id}:placed`,
+    "任务已分配",
+    `已放到项目「${project}」。任务：${event.summary || event.type}`,
+    {
+      fyi: true,
+      source: event.source,
+      lane: event.subject,
+      ...(event.reply && { reply: event.reply }),
+    },
+  );
 }
 
 /** Put an event into a project through the same dispatch path as any other event. */
@@ -667,13 +816,16 @@ function placeEvent(
   session: "continue" | "new",
   reason: string,
 ): string | null {
+  const rule = projectRule(draft, project, event.source, event.type);
+  if (!rule) return `项目「${project}」没有能接这个来源和类型的规则`;
   const problem = placementProblem(draft, event, project);
   if (problem) return problem;
-  const rule = projectRule(draft, project, event.source, event.type)!;
-  const lane = rule.parallel ? event.subject : "";
-  const [last] = rows(draft.view, "runs", { rule: rule.name, lane, state: ["done", "nothing"] }, 1, true);
-  const resume = session === "continue" && last?.agent === rule.to ? last.session : undefined;
-  const queued = enqueue(draft, rule, event.id, lane, resume, false, false, session === "new");
+  const lane = placedLane({ ...rule, parallel: rule.parallel ?? 1 }, event);
+  const kept = session === "continue" ? continuation(draft, rule, lane) : { resume: undefined, why: "按要求开新会话" };
+  const resume = kept.resume;
+  // `continue` only means "continue if that is safe". With no usable session, or one another live round holds, this is
+  // a new session: merging into that busy round would run two unrelated tasks in one conversation.
+  const queued = enqueue(draft, rule, event.id, lane, resume, false, false, !resume);
   if (queued === null) return `项目「${project}」现在不能接新活`;
   dispatch(
     draft,
@@ -683,6 +835,8 @@ function placeEvent(
     reason || project,
     false,
   );
+  put(draft, "events", event.id, { dispatch_project: project, dispatch_state: "placed" });
+  placedNotice(draft, event, project);
   return null;
 }
 
@@ -700,20 +854,82 @@ function applyRoute(draft: Draft, run: Row, result: Result) {
   const [event] = assessedEventsOf(draft, run);
   if (!event) return [];
   const route = result.route;
+  const create = result.create;
+  const notices = result.notice ?? [];
+  const direct = notices.filter((notice) => notice.fyi === true);
+  if (create) {
+    if (result.ask?.length || result.resolve?.length || result.later?.length || result.events?.length) {
+      recordDispatch(draft, run, event, "unassigned", undefined, "调度轮只能创建项目或直接回复");
+      unassigned(draft, event, run, "调度轮只能创建项目或直接回复，不能提问、定时或发事件");
+      return [];
+    }
+    if (route) {
+      recordDispatch(draft, run, event, "unassigned", route, "调度不能同时创建项目和分配已有项目");
+      unassigned(draft, event, run, "调度不能同时创建项目和分配已有项目", route);
+      return [];
+    }
+    const problem = creationProblem(draft, event, create);
+    if (problem) {
+      recordDispatch(draft, run, event, "unassigned", undefined, problem);
+      unassigned(draft, event, run, problem);
+      return [];
+    }
+    add(draft, "project_creations", {
+      event_id: event.id,
+      dispatch_run: run.id,
+      source: event.source,
+      event_type: event.type,
+      actor: event.actor ?? "",
+      project: create.project,
+      description: create.description,
+      cwd: create.cwd ?? "",
+      agent: create.agent ?? "",
+      worker: create.worker ?? "",
+      subjects: JSON.stringify(create.subjects ?? []),
+      confidence: create.confidence,
+      state: "pending",
+      reason: result.summary ?? "",
+      created_at: draft.at,
+    });
+    recordDispatch(draft, run, event, "unassigned", undefined, `提议新建项目「${create.project}」，等待中台写入配置`);
+    put(draft, "events", event.id, { dispatch_state: "creating" });
+    notify(
+      draft,
+      `dispatch:${event.id}:creating`,
+      "正在新建项目",
+      `调度建议新建项目「${create.project}」。中台写入配置后会重新判断这件事。`,
+      { fyi: true, source: event.source, lane: event.subject, ...(event.reply && { reply: event.reply }) },
+    );
+    return [];
+  }
+  if (!route && direct.length) {
+    directReply(draft, run, event, direct);
+    return [];
+  }
+  // A dispatcher is a translation round, not a work round: execution-only receipts are refused instead of applied.
+  if (result.ask?.length || result.resolve?.length || result.later?.length || result.events?.length) {
+    recordDispatch(draft, run, event, "unassigned", route, "调度轮只能分配或直接回复");
+    unassigned(draft, event, run, "调度轮只能分配项目或直接回复，不能提问、定时或发事件");
+    return [];
+  }
   const problem = route ? routeProblem(draft, run, route) : "调度没有给出项目";
   if (route && !problem && route.confidence < (draft.rules.policy?.dispatch?.minConfidence ?? 0.7)) {
+    recordDispatch(draft, run, event, "unassigned", route, `调度拿不准（置信度 ${route.confidence}）`);
     unassigned(draft, event, run, `调度拿不准（置信度 ${route.confidence}），项目「${route.project}」没有执行`, route);
     return [];
   }
   if (!route) {
+    recordDispatch(draft, run, event, "unassigned", undefined, problem ?? "调度没有给出项目");
     unassigned(draft, event, run, problem ?? "调度没有给出项目");
     return [];
   }
   if (problem) {
+    recordDispatch(draft, run, event, "unassigned", route, problem);
     unassigned(draft, event, run, problem ?? "调度没有给出项目", route);
     return [];
   }
   if (route.session === "ask") {
+    recordDispatch(draft, run, event, "unassigned", route, "等本人确认项目");
     const choices = projectChoices(draft, event);
     const rest = choices.filter((project) => project !== route.project);
     askPlacement(
@@ -728,7 +944,24 @@ function applyRoute(draft: Draft, run: Row, result: Result) {
     return [];
   }
   const problemNow = placeEvent(draft, event, route.project, route.session, route.reason ?? route.project);
-  if (problemNow) unassigned(draft, event, run, problemNow, route);
+  if (problemNow) {
+    recordDispatch(draft, run, event, "unassigned", route, problemNow);
+    unassigned(draft, event, run, problemNow, route);
+  } else {
+    const rule = projectRule(draft, route.project, event.source, event.type)!;
+    const kept =
+      route.session === "continue"
+        ? continuation(draft, rule, placedLane({ ...rule, parallel: rule.parallel ?? 1 }, event))
+        : null;
+    recordDispatch(
+      draft,
+      run,
+      event,
+      "placed",
+      route,
+      `${route.reason ?? route.project}${kept ? `；${kept.why}` : ""}`,
+    );
+  }
   return [];
 }
 
@@ -740,6 +973,8 @@ function unassigned(draft: Draft, event: Row, run: Row, why: string, route?: Res
     ? `\n考虑过项目「${route.project}」，置信度 ${route.confidence}${route.reason ? `：${route.reason}` : ""}。`
     : "";
   askPlacement(draft, event, run, "有件事没分配到项目", `${why}${considered}`, projectChoices(draft, event), key);
+  if (draft.view.get("events", event.id)?.dispatch_state !== "failed")
+    put(draft, "events", event.id, { dispatch_state: "unassigned" });
 }
 
 /** What an assessor round decided about each event it read: the only thing that makes its rule take the event. */
@@ -914,6 +1149,9 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   const since = held ? { claimed_at: run.claimed_at, link: run.link } : { claimed_at: draft.at, link: null };
   const claiming = { state: "claimed", claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
   put(draft, "runs", run.id, { ...claiming, ...nulls("last_issued", "last_result", "last_answer") });
+  if (run.kind === "dispatch")
+    for (const event of assessedEventsOf(draft, draft.view.get("runs", run.id)!))
+      put(draft, "events", event.id, { dispatch_run: run.id, dispatch_state: "running" });
   return jobOf(draft.view, draft.view.get("runs", run.id)!, draft.env, draft.now);
 }
 
@@ -1179,7 +1417,10 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
       error: result.error ?? null,
     });
     const [event] = assessedEventsOf(draft, run);
-    if (event) unassigned(draft, event, run, `调度没跑成：${result.error ?? result.summary ?? "没有说明"}`);
+    if (event) {
+      recordDispatch(draft, run, event, "failed", undefined, result.error ?? result.summary ?? "调度没跑成");
+      unassigned(draft, event, run, `调度没跑成：${result.error ?? result.summary ?? "没有说明"}`);
+    }
     put(draft, "runs", id, { last_answer: "[]" });
     return { rejected: [] };
   }
@@ -1238,16 +1479,55 @@ function answer(draft: Draft, id: number, given: Row) {
     if (!event) throw new Conflict("这张卡片对应的事件已经不在了");
     if (choice === "先放着") {
       closeCard(draft, card, "先放着", given.by ?? null, text);
+      put(draft, "events", event.id, { dispatch_state: "unassigned" });
       return { changed: true, state: "closed" };
     }
     if (choice === "知道了") {
       closeCard(draft, card, "知道了", given.by ?? null, text);
+      put(draft, "events", event.id, { dispatch_state: "unassigned" });
       return { changed: true, state: "closed" };
     }
     const project = choice ?? "";
     if (!projectChoices(draft, event).includes(project)) throw new InputError("没有这个项目");
     const problem = placeEvent(draft, event, project, "continue", "person");
     if (problem) throw new Conflict(problem);
+    const suggested = rows(draft.view, "dispatch_decisions", { event_id: event.id }, 1, true)[0]?.project;
+    if (suggested && suggested !== project) {
+      add(draft, "dispatch_corrections", {
+        event_id: event.id,
+        suggested,
+        chosen: project,
+        source: event.source,
+        actor: event.actor ?? "",
+        lane: event.subject,
+        reason: "本人选了另一个项目",
+        created_at: draft.at,
+      });
+      const preference = rows(draft.view, "dispatch_preferences", {
+        project,
+        source: event.source,
+        actor: event.actor ?? "",
+      })[0];
+      if (preference)
+        put(draft, "dispatch_preferences", preference.id, {
+          ...preference,
+          reason: "本人纠正过调度",
+          confirmations: (preference.confirmations ?? 0) + 1,
+          active: 1,
+          updated_at: draft.at,
+        });
+      else
+        add(draft, "dispatch_preferences", {
+          project,
+          source: event.source,
+          actor: event.actor ?? "",
+          reason: "本人纠正过调度",
+          confirmations: 1,
+          active: 1,
+          created_at: draft.at,
+          updated_at: draft.at,
+        });
+    }
     closeCard(draft, card, `已放到 ${project}`, given.by ?? null, text);
     return { changed: true, state: "closed" };
   }
@@ -1519,6 +1799,32 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     put(draft, "seen", `channel:${name}`, { kind: "channel", name, seen_at: draft.at });
   },
   claimNext,
+  projectCreated(draft, eventId, project) {
+    createdProject(draft, eventId, project);
+  },
+  projectCreationResult(draft, id, state, error) {
+    const creation = draft.view.get("project_creations", id);
+    if (!creation || creation.state !== "pending") return;
+    put(draft, "project_creations", id, {
+      state,
+      error: error ?? null,
+      applied_at: draft.at,
+    });
+  },
+  projectCreationFailed(draft, eventId, reason) {
+    let event = draft.view.get("events", eventId);
+    if (!event || event.dispatch_state !== "creating") return;
+    // The card may already exist from the proposal round; marking the state first keeps `unassigned` from overwriting it.
+    put(draft, "events", eventId, { dispatch_state: "unassigned" });
+    event = draft.view.get("events", eventId)!;
+    const run = draft.view.get("runs", event.dispatch_run);
+    if (run) unassigned(draft, event, run, reason || "新建项目失败");
+    else
+      notify(draft, `dispatch:${eventId}:create-failed`, "新建项目失败", reason || "新建项目失败", {
+        once: true,
+        ...(event.reply && { reply: event.reply }),
+      });
+  },
   started(draft, id, token, given) {
     const { session, link } = given ?? {};
     for (const [field, value] of Object.entries({ session, link })) {
@@ -1528,6 +1834,19 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     }
     const run = heldRun(draft, id, token, ["claimed"]);
     put(draft, "runs", id, { session: session ?? run.session, link: link ?? run.link, seen_at: draft.at });
+  },
+  progress(draft, id, token, given) {
+    const run = heldRun(draft, id, token, ["claimed"]);
+    const progress = parseProgress(given);
+    const at = progress.at ?? draft.at;
+    add(draft, "run_progress", {
+      run_id: run.id,
+      at,
+      step: progress.step,
+      detail: progress.detail ?? "",
+      kind: progress.kind ?? "",
+    });
+    put(draft, "runs", id, { seen_at: draft.at });
   },
   finish,
   cancel(draft, id) {

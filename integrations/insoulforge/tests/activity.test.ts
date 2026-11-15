@@ -191,14 +191,66 @@ test("each project and conversation gets its own lane; the reply stays with the 
   assert.match(shop.id, /^insoulforge:/);
 });
 
+test("a submit without a project hint stays conversation-only so the dispatcher can choose", async () => {
+  const seen: any[] = [];
+  const service = createService(config, {
+    submit: async (event) => {
+      seen.push(event);
+      return {
+        event: 9,
+        duplicate: false,
+        routed: [],
+        paused: [],
+        pending: true,
+        dispatch: { state: "queued", run: 3 },
+      };
+    },
+    outcome: async () => ({ runs: [] }),
+    state: async () => ({ cards: [], runs: [] }),
+    answer: async () => ({}),
+  });
+  const result: any = await service.handle(
+    { action: "submit", text: "查一下明天天气", target_session: "private:10001001" },
+    { sender_id: "10001001" },
+  );
+  assert.equal(result.success, true);
+  assert.equal(seen[0].subject, "qq-private-10001001");
+  assert.equal(result.result.project, undefined);
+  assert.equal(result.result.pending, true);
+  assert.match(result.result.ack, /正在判断属于哪个项目/);
+  assert.doesNotMatch(result.result.ack, /没有规则/);
+});
+
+test("an explicit project hint keeps the old lane shape and dispatches directly", async () => {
+  const seen: any[] = [];
+  const service = createService(config, {
+    submit: async (event) => {
+      seen.push(event);
+      return { event: 10, duplicate: false, routed: ["QQ 任务"], paused: [] };
+    },
+    outcome: async () => ({ runs: [{ run: 44, state: "queued", summary: "修一下" }] }),
+    state: async () => ({ cards: [], runs: [] }),
+    answer: async () => ({}),
+  });
+  const result: any = await service.handle(
+    { action: "submit", project_hint: "shop", text: "修一下", target_session: "group:20002002" },
+    { sender_id: "10001001" },
+  );
+  assert.equal(result.success, true);
+  assert.equal(seen[0].subject, "qq-group-20002002/shop");
+  assert.equal(result.result.project, "shop");
+  assert.match(result.result.ack, /已派单给 Agent Autoloop（项目：shop/);
+});
+
 test("instructions tell the model where the session comes from and what it may not change", () => {
   const text = instructions(config);
   assert.match(text, /current_session/);
   assert.match(text, /group:<群号>/);
   assert.match(text, /- shop：商城/);
   assert.match(text, /天气、资料、新闻/);
-  assert.match(text, /必须选 general/);
-  assert.match(text, /禁止默认选列表里的第一个项目/);
+  assert.match(text, /可以选 general/);
+  assert.match(text, /不确定就省略 project_hint/);
+  assert.match(text, /不要默认选列表里的第一个项目/);
   assert.match(text, /不是文件路径/);
 });
 
@@ -247,7 +299,14 @@ test("status only reports the allowed chats, and a project narrows it further", 
       { id: 3, lane: "qq-private-10001001/site", title: "私聊", text: "z", options: ["a", "b"] },
     ],
     runs: [
-      { id: 10, lane: "qq-group-20002002/shop", state: "claimed", summary: "在改", createdAt: "t" },
+      {
+        id: 10,
+        lane: "qq-group-20002002/shop",
+        state: "claimed",
+        summary: "在改",
+        progress: [{ step: "执行命令：npm test" }, { step: "修改文件：src/app.ts" }],
+        createdAt: "t",
+      },
       { id: 11, lane: "qq-group-20002002/site", state: "queued", summary: "排队", createdAt: "t" },
       { id: 12, lane: "qq-group-999/shop", state: "done", summary: "别人", createdAt: "t" },
       { id: 13, lane: "qq-group-20002002/shop", state: "failed", summary: "", error: "炸了", createdAt: "t" },
@@ -262,6 +321,10 @@ test("status only reports the allowed chats, and a project narrows it further", 
   assert.equal(all.result.counts.queued, 1);
   assert.equal(all.result.counts.waiting, 2);
   assert.ok(all.result.summary.includes("炸了"));
+  assert.ok(all.result.summary.includes("#10 运行中：在改（进展：修改文件：src/app.ts）"));
+  assert.deepEqual(all.result.runs.find((run: any) => run.run === 10).progress.at(-1), {
+    step: "修改文件：src/app.ts",
+  });
   const shop = statusOf(state, config, "group:20002002", "shop") as any;
   assert.deepEqual(
     shop.result.cards.map((card: any) => card.card),
@@ -304,7 +367,7 @@ test("a submit posts one event with the source key's shape and its project lane"
   });
   assert.deepEqual(
     await service.handle({ action: "submit", project: "../etc", text: "x", target_session: "group:20002002" }),
-    { success: false, error: "project 不在允许的项目里" },
+    { success: false, error: "project_hint 不在允许的项目里" },
   );
   assert.deepEqual(
     await service.handle({ action: "submit", project: "shop", text: "x", target_session: "group:999" }),

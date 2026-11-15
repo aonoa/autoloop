@@ -1,7 +1,7 @@
 // Failure modes: --json changes the state instead of printing it; the human output stops being the plain one; an
 // unknown flag is ignored and the command quietly does something else; a client can't tell where in the log the state
 // was read, so it replays the whole log or misses what came between; an owner's card can't be tied to the matter it's
-// about.
+// about; an event waiting for a dispatcher is shown as unrouted or omitted from the state.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
@@ -108,6 +108,34 @@ test("status --json prints the same state the hub serves, and the plain output s
   assert.ok(!human.trim().startsWith("{"));
   assert.match(human, /在跑|排队|等你/);
   assert.doesNotMatch(human, /\x1b/, "no colour codes when it isn't a terminal");
+});
+
+test("an event waiting for the dispatcher is counted and listed, not left under unrouted", () => {
+  hub.execute(
+    "rules",
+    [
+      hub.parseRules(
+        JSON.stringify({
+          sources: { local: { name: "本机" } },
+          agents: { helper: { name: "助手", worker: "this-machine", use: "command", command: ["true"] } },
+          channels: {},
+          rules: [],
+          policy: { dispatch: { agent: "helper", minConfidence: 0.7 } },
+        }),
+        Date.now(),
+      ),
+    ],
+    Date.now(),
+  );
+  const queued = hub.ingest("local", { id: "waiting", type: "other.task", subject: "qq-private-1" }, at(10));
+  assert.equal(queued.pending, true);
+  const state = hub.stateOf(at(10));
+  assert.equal(state.totals.dispatching, 1);
+  assert.equal(state.dispatching[0].state, "queued");
+  assert.equal(
+    state.unrouted.some((event: any) => event.key === "waiting"),
+    false,
+  );
 });
 
 test("an unknown flag is refused instead of ignored", async () => {

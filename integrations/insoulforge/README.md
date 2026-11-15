@@ -64,11 +64,11 @@ Authorization: Bearer <Activity Token>
 | `allow.groups`   | 允许派任务的群号                                                                                          |
 | `allow.actor`    | 经 InSoulForge 进来的任务统一使用的可信操作者 QQ 号，必须是 `allow.private` 里的人                        |
 | `allow.senders`  | 允许派任务、回答卡片、查看进度和项目清单的真实 QQ 号；身份由 InSoulForge 注入，缺省时沿用 `allow.private` |
-| `projects`       | 项目短名、说明和对应规则；建议保留一个 `general` 通用任务 lane                                            |
+| `projects`       | 项目短名、说明和对应规则；可以保留一个 `general` 通用任务 lane，拿不准时不必填项目                        |
 
 项目短名必须是 ASCII：字母、数字、`.`、`_`、`-`，因为 Autoloop 的 `subject` 只接受这些字符；中文说明放在 `description`。
 
-除代码仓库外，建议显式配置一个通用项目，否则天气、资料、新闻等任务没有合适的 lane，模型可能在必须选择时猜成第一个代码项目：
+`projects` 是模型可显式指定的项目提示，不是必须填的字段。明确知道项目时传 `project_hint`；拿不准就省略，交给 Autoloop 的调度 Agent 判断。明确的天气、资料、新闻、查询等通用任务可以选 `general`，但不要为了凑一个项目而猜第一个代码项目：
 
 ```json
 "projects": {
@@ -77,7 +77,7 @@ Authorization: Bearer <Activity Token>
 }
 ```
 
-对应的 `general` 规则应使用独立的 `cwd`（例如 `/home/mini/work`），并让 `subjects` 匹配 `qq-group-<群号>/general*` 与 `qq-private-<QQ号>/general*`。不要给 `general` 开启 `resume`：不同通用问题共享一个会话会串上下文；回答卡片仍会回到原线程。
+如果保留 `general`，对应规则应使用独立的 `cwd`（例如 `/home/mini/work`），并让 `subjects` 匹配 `qq-group-<群号>/general*` 与 `qq-private-<QQ号>/general*`。不要给 `general` 开启 `resume`：不同通用问题共享一个会话会串上下文；回答卡片仍会回到原线程。没有 `general` 或不想指定时，省略 `project_hint`，由调度按项目说明选择或转成未分配卡片。
 
 **密钥不进模型。** `sourceKey` 和 `ownerKey` 只由本服务读取；模型只能通过 Activity 的受控动作使用它们。不要把 `ownerKey` 配进聊天机器人的系统提示词或插件参数。
 
@@ -131,7 +131,7 @@ InSoulForge 只有一个工具：`request_activity(name, parameters)`，`name` �
 ```json
 {
   "action": "submit",
-  "project": "shop",
+  "project_hint": "shop",
   "text": "结算页报错，修一下",
   "target_session": "group:20002002"
 }
@@ -160,7 +160,7 @@ InSoulForge 同时把当前会话作为 `context.session_id` 注入。`target_se
 因此群内是否允许派任务由 `allow.senders` 决定，而不是由群是否在 `allow.groups` 里决定。只想自己派任务时，把
 `allow.senders` 设成自己的 QQ 号；群里其他人仍可聊天，但无法派任务或回答卡片。
 
-`subject` 带项目短名，所以同一群里不同项目各走一条 lane；规则写 `parallel` 和 `resume` 时各自排队、各自续接上下文。`reply` 让卡片和完成通知回到原私聊或原群。
+传了 `project_hint` 时，`subject` 带项目短名，同一群里不同项目各走一条 lane；规则写 `parallel` 和 `resume` 时各自排队、各自续接上下文。没传时 `subject` 是会话级 lane（例如 `qq-group-20002002`），Autoloop 的调度 Agent 选好项目后再规范成 `qq-group-20002002/<项目>`，不会让两个项目共享上下文。`reply` 让卡片、调度结果和完成通知回到原私聊或原群。
 
 提交成功返回：
 
@@ -182,7 +182,7 @@ InSoulForge 同时把当前会话作为 `context.session_id` 注入。`target_se
 }
 ```
 
-`accepted=false` 表示事件已写入中台，但没有规则接单；`ack` 会明确说明这一点，不能向用户谎称已开始执行。执行器在 `request_activity` 成功后会把 `ack` 作为确定性回执发给用户：模型自己已发过回复时追加一条，没发时补发一条。提交失败返回 `success=false`，模型必须把失败原因告诉用户。
+没有 `project_hint` 时，`project` 字段为空、`pending` 为 true，`ack` 是“已提交，正在判断属于哪个项目”。这表示任务已经写入中台，不能向用户说“没有规则接单”。`accepted=false` 只在明确没有调度、也没有规则接单时出现；`ack` 会如实说明。执行器在 `request_activity` 成功后会把 `ack` 作为确定性回执发给用户：模型自己已发过回复时追加一条，没发时补发一条。提交失败返回 `success=false`，模型必须把失败原因告诉用户。
 
 任务完成、失败或需要用户决定时，Autoloop 的 `insoulforge` 回投通道发送 `[Autoloop 状态] 完成/提问` 通知，并使用 `mode=force` 触发回复；进度通知使用 `judge`，允许聊天模型判断是否值得打扰。
 
@@ -193,6 +193,8 @@ InSoulForge 同时把当前会话作为 `context.session_id` 注入。`target_se
 ```
 
 `project` 和 `target_session` 都可省略。只返回白名单会话里的数据，不让一个群看到另一个群的卡片和任务。
+
+运行中的任务会带最近一步进展，`summary` 里形如 `#42 运行中：修结算页（进展：修改文件：src/app.ts）`，结构化结果在 `runs[].progress`。进度只是展示，不改变任务状态；完整时间线用 `agent-autoloop why 42` 看。
 
 ### `answer`
 

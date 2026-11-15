@@ -86,11 +86,11 @@ netsh int ipv4 show excludedportrange protocol=tcp
 
 ## 日志
 
-| 平台 | 位置 |
-| --- | --- |
-| macOS | `~/.agent-autoloop/logs/up.log` |
+| 平台    | 位置                                        |
+| ------- | ------------------------------------------- |
+| macOS   | `~/.agent-autoloop/logs/up.log`             |
 | Windows | `%USERPROFILE%\.agent-autoloop\logs\up.log` |
-| Linux | `journalctl --user -u agent-autoloop` |
+| Linux   | `journalctl --user -u agent-autoloop`       |
 
 日志包含：
 
@@ -261,6 +261,8 @@ agent-autoloop status --json
 - `agents[].online`、`channels[].online`；
 - `matters[].stage`；
 - `unrouted`。
+
+正在运行的轮次在 `runs[].progress` 里带最近 20 条步骤，可用于看板显示“正在做什么”。它只用于展示，不能作为授权或调度依据；没有步骤的旧轮次保持空数组。步骤来自 Agent 的流式输出，敏感内容不应进入进度；发现异常时用 `agent-autoloop why <轮次>` 核对时间线。
 
 ### 日志流
 

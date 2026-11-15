@@ -22,6 +22,8 @@ export type Services = {
   wait(until: number, signal: AbortSignal): Promise<void>;
   stream(after: number, signal: AbortSignal, key: string): ReadableStream;
   adapt(source: string, headers: Headers, body: string): Promise<unknown[]>;
+  /** Owner-only project registration: the hub writes its own rules and optional Activity list. */
+  project(action: "add" | "remove" | "list", input?: unknown): unknown;
 };
 
 const MAX_BODY = 1024 * 1024;
@@ -76,7 +78,15 @@ function callFrom(services: Services, request: Request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
   const now = services.now();
   const view = services.view();
-  return { services, request, url, token, now, view, rules: configuration(view) };
+  return {
+    services,
+    request,
+    url,
+    token,
+    now,
+    view,
+    rules: configuration(view),
+  };
 }
 type Call = ReturnType<typeof callFrom>;
 
@@ -309,7 +319,7 @@ async function route(call: Call): Promise<Response> {
   }
   if (method === "POST" && path === "/v1/tell") return tell(call);
   if (method === "GET" && path === "/v1/work") return work(call);
-  const [, runPart, action] = /^\/v1\/runs\/([1-9][0-9]*)\/(started|result|cancel|why)$/.exec(path) ?? [];
+  const [, runPart, action] = /^\/v1\/runs\/([1-9][0-9]*)\/(started|progress|result|cancel|why)$/.exec(path) ?? [];
   const runId = Number(runPart);
   if (method === "GET" && action === "why") {
     requireKey(call, "owner");
@@ -320,6 +330,10 @@ async function route(call: Call): Promise<Response> {
     act(call, "started", runId, token, await readJson(request));
     return json({ ok: true });
   }
+  if (method === "POST" && action === "progress") {
+    act(call, "progress", runId, token, await readJson(request));
+    return json({ ok: true });
+  }
   if (method === "POST" && action === "result") return json(act(call, "finish", runId, token, await readJson(request)));
   if (method === "GET" && path === "/v1/cards/next") return nextCard(call);
   const card = /^\/v1\/cards\/([1-9][0-9]*)\/(delivered|failed|answer|resolve)$/.exec(path);
@@ -328,6 +342,23 @@ async function route(call: Call): Promise<Response> {
   if (method === "POST" && ruleControl) return control(call, ruleControl[1], ruleControl[2]);
   if (method === "GET" && path === "/v1/state") return state(call);
   if (method === "GET" && path === "/v1/stream") return stream(call);
+  if (method === "GET" && path === "/v1/projects") {
+    requireKey(call, "owner");
+    return json(call.services.project("list"));
+  }
+  if (method === "POST" && path === "/v1/projects") {
+    requireKey(call, "owner");
+    const body = await readJson(request);
+    // The HTTP door never chooses a file: it writes the hub's own rules and the Activity list the service is configured with.
+    if (body && typeof body === "object" && "activityConfig" in body)
+      throw new InputError("activityConfig 只能在命令行使用");
+    return json(call.services.project("add", body));
+  }
+  const project = /^\/v1\/projects\/([A-Za-z0-9._-]{1,40})$/.exec(path);
+  if (method === "DELETE" && project) {
+    requireKey(call, "owner");
+    return json(call.services.project("remove", project[1]));
+  }
   return json({ error: "没有这个地址" }, 404);
 }
 

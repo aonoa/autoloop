@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { checkSchema } from "../protocol/schema.ts";
-import { parseEvent, parseResult } from "../protocol/validate.ts";
+import { parseEvent, parseProgress, parseResult } from "../protocol/validate.ts";
 
 test("notice receipts accept an optional boolean fyi and keep all other boundaries", () => {
   const notice = { title: "已设好", text: "每天九点检查", key: "daily-check" };
@@ -101,6 +101,24 @@ test("usage must be an object of finite nonnegative amounts", () => {
   }
 });
 
+test("progress is a bounded step, never an unknown field or an invented time", () => {
+  const step = { step: "执行命令：npm test", detail: "先跑测试", kind: "command" };
+  assert.deepEqual(checkSchema("progress", step), []);
+  assert.deepEqual(parseProgress(step), step);
+  assert.deepEqual(checkSchema("progress", { ...step, at: "2026-11-07T02:00:00+08:00" }), []);
+  for (const bad of [
+    { step: " " },
+    { step: "x".repeat(501) },
+    { step: "x", detail: "y".repeat(4001) },
+    { step: "x", kind: "k".repeat(41) },
+    { step: "x", at: "2026-11-07 02:00:00" },
+    { step: "x", command: "rm -rf /" },
+  ]) {
+    assert.throws(() => parseProgress(bad), JSON.stringify(bad).slice(0, 80));
+    assert.ok(checkSchema("progress", bad).length);
+  }
+});
+
 test("the published schema carries dispatch rounds and routes", () => {
   const job = {
     run: 1,
@@ -120,6 +138,8 @@ test("the published schema carries dispatch rounds and routes", () => {
       decided: [],
       dispatch: {
         minConfidence: 0.7,
+        create: true,
+        workers: ["w1"],
         projects: [
           {
             project: "mini",
@@ -130,6 +150,9 @@ test("the published schema carries dispatch rounds and routes", () => {
             online: true,
             subjects: ["#mini*"],
             aliases: [],
+            description: "迷你项目",
+            canContinue: false,
+            preferences: [],
           },
         ],
         matters: [{ project: "mini", rule: "QQ 任务 mini", lane: "", stage: "idle", lastRun: 2 }],
@@ -143,6 +166,20 @@ test("the published schema carries dispatch rounds and routes", () => {
   assert.ok(
     checkSchema("result", { outcome: "done", route: { project: "mini", session: "later", confidence: 2 } }).length,
   );
+  const create = {
+    outcome: "done",
+    create: { project: "shop", description: "商城", confidence: 0.9, cwd: "/srv/shop" },
+  };
+  assert.deepEqual(checkSchema("result", create), []);
+  assert.deepEqual(parseResult(create), create);
+  for (const bad of [
+    { ...create, create: { project: "shop", description: "商城" } },
+    { ...create, create: { project: "shop", description: "商城", confidence: 2 } },
+    { ...create, create: { project: "shop", description: "商城", confidence: 0.9, unknown: true } },
+  ]) {
+    assert.throws(() => parseResult(bad));
+    assert.ok(checkSchema("result", bad).length);
+  }
 });
 
 test("timer timestamps are real calendar dates in the documented ISO format", () => {

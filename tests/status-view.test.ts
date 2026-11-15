@@ -34,6 +34,9 @@ const state = {
     week: { rounds: 0, tokens: 0, cached: 0, cost: 0, missingTokens: 0, missingCost: 0 },
   },
   totals: { running: 1, queued: 0, retrying: 0, unknown: 0, doneToday: 1 },
+  dispatching: [
+    { id: 8, source: "app", type: "qq.task", subject: "qq-private-10001", summary: "查一下天气", state: "queued" },
+  ],
   agents: [{ name: "Claude", worker: "m4", online: false, seenAt: "2026-11-06T13:00:00.000Z" }],
   channels: [{ name: "飞书", online: true, seenAt: now }],
   sources: [{ id: "app", name: "应用" }],
@@ -64,7 +67,12 @@ const state = {
       answer: null,
     },
   ],
-  runs: [run(3, "claimed", "早报"), run(2, "done", "早报", { summary: "好了" })],
+  runs: [
+    run(3, "claimed", "早报", {
+      progress: [{ step: "执行命令：npm test" }, { step: "修改文件：src/app.ts" }],
+    }),
+    run(2, "done", "早报", { summary: "好了" }),
+  ],
   unrouted: [{ source: "app", type: "x.new", subject: "#1", summary: "" }],
 };
 
@@ -95,7 +103,7 @@ test("Chinese, Japanese and Korean characters take two columns, and columns line
 
 test("what waits for the owner comes first, then what's going on, then what only reports", () => {
   const text = render(state, { color: false, columns: 100 });
-  const order = ["在线", "等你 1", "正在做", "最近几轮", "最近的卡片", "定时", "没有规则接的事件"];
+  const order = ["在线", "待调度", "等你 1", "正在做", "最近几轮", "最近的卡片", "定时", "没有规则接的事件"];
   const at = order.map((heading) => text.split("\n").indexOf(heading));
   assert.ok(
     at.every((index) => index > 0),
@@ -106,12 +114,15 @@ test("what waits for the owner comes first, then what's going on, then what only
     at,
   );
   assert.match(text.split("\n")[0], /^等你 1 · 在跑 1/);
+  assert.match(text, /待调度\n {2}应用 qq\.task qq-private-10001：查一下天气 {2}排队等调度/);
   const notice = text.split("\n").filter((line) => line.includes("第一段"));
   assert.equal(notice.length, 1, "a notice dealt with takes one line, not its whole text");
   assert.match(notice[0], /…$/);
   assert.doesNotMatch(text, /第二段/);
   assert.match(text, /https:\/\/example\.com\/x/);
   assert.doesNotMatch(text, /\]\(/, "a link shows as its words and its address, not markdown");
+  assert.match(text, /#3 早报[^\n]*\n[^\n]*\n[^\n]*进展：修改文件：src\/app\.ts/);
+  assert.doesNotMatch(text, /进展：执行命令：npm test/, "a running run shows only its latest step");
 });
 
 test("a paused rule says since when, how many events it has skipped, the latest of them, and that there are more", () => {

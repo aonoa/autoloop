@@ -163,6 +163,12 @@ test("a receipt-shaped json block without the trusted marker is repaired, not si
   assert.equal(message.receipt, undefined);
 });
 
+test("a receipt-shaped block with no language tag is repaired too", () => {
+  const message = readMessage('完成计划\n```\n{"route":{"project":"general","session":"new","confidence":0.99}}\n```');
+  assert.match(message.problem!, /agent-autoloop/);
+  assert.equal(message.receipt, undefined);
+});
+
 test("ordinary json that happens to contain a receipt field stays ordinary output", () => {
   const message = readMessage('完成分析\n```json\n{"events":[{"name":"launch"}],"count":1}\n```');
   assert.equal(message.problem, undefined);

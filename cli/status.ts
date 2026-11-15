@@ -167,6 +167,7 @@ export function render(state: any, { color, columns }: { color: boolean; columns
       count("等你", state.cards.length, yellow),
       count("在跑", totals.running, cyan),
       count("排队", totals.queued - totals.retrying, yellow),
+      totals.dispatching ? count("待调度", totals.dispatching, yellow) : "",
       totals.retrying ? count("等重派", totals.retrying, yellow) : "",
       totals.unknown ? count("不确定", totals.unknown, red) : "",
       `今天做完 ${totals.doneToday}`,
@@ -193,6 +194,13 @@ export function render(state: any, { color, columns }: { color: boolean; columns
   }
 
   const sourceName = (id: string) => state.sources.find((one: any) => one.id === id)?.name ?? id;
+  const dispatching = state.dispatching ?? [];
+  if (dispatching.length) section(heading("待调度"));
+  for (const event of dispatching) {
+    const words = `${sourceName(event.source)} ${event.type} ${event.subject}`;
+    const state = event.state === "running" ? "调度中" : "排队等调度";
+    say(`  ${yellow(words)}${event.summary ? dim(`：${event.summary}`) : ""}  ${dim(state)}`);
+  }
   const paused = state.lines.filter((line: any) => line.paused);
   if (paused.length) section(`${heading("暂停中")}${dim("（恢复：agent-autoloop resume <规则>）")}`);
   for (const line of paused) {
@@ -240,6 +248,11 @@ export function render(state: any, { color, columns }: { color: boolean; columns
     const stopping = run.stopping ? `  ${yellow("正在停")}` : "";
     say(`  ${dim(`#${run.id}`)} ${run.rule}  ${cyan(`已跑 ${lasted(run.claimedAt)}`)}${stopping}`);
     if (run.events[0]) for (const line of wrap(`因为${because(run.events[0])}`, room - 6, 1)) say(`      ${dim(line)}`);
+    // The latest step only: the timeline in `why` has the rest, and a busy run would otherwise fill the screen.
+    const step = Array.isArray(run.progress) ? run.progress.at(-1) : undefined;
+    if (step?.step) {
+      for (const line of wrap(`进展：${step.step}`, room - 6, 2)) say(`      ${cyan(line)}`);
+    }
   }
   for (const run of queued) {
     const retry = run.attempts > 0;

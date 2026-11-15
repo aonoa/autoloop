@@ -11,16 +11,23 @@ import { stagesOf } from "../kernel/stage.ts";
 /** The columns of the read-only SQL views over the projections, which the queries here read. */
 const VIEWS = {
   events:
-    "id source key type subject summary detail link actor reply matched routed dispatched paused refused received_at",
+    "id source key type subject summary detail link actor reply matched routed dispatched paused refused dispatch_run dispatch_state dispatch_project received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
     "claimed_at seen_at finished_at manual summary error usage report",
   run_events: "run_id event_id context",
+  run_progress: "id run_id at step detail kind",
   cards:
     "id key kind title text options recommend about state fyi quiet choice answer by result rule lane grp source " +
     "agent session run_id answer_event version created_at decided_at closed_at reply",
   deliveries: "card_id channel version ref tries first_try_at not_before error given_up",
   decisions: "id event_id rule source actor state reason strength scope rules_version decided_at",
+  dispatch_decisions:
+    "id event_id dispatch_run source actor snapshot_version candidates project session confidence reason outcome created_at",
+  dispatch_corrections: "id event_id suggested chosen source actor lane reason created_at",
+  dispatch_preferences: "id project source actor reason confirmations active created_at updated_at",
+  project_creations:
+    "id event_id dispatch_run source event_type actor project description cwd agent worker subjects confidence state reason created_at applied_at error",
   mandates: "event_id rule strength reason scope rules_version granted_at",
   timers: "id rule lane key source agent session about at event_id reply created_at",
   schedules: "rule cron next_at skipped_at",
@@ -139,6 +146,9 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
     return { seenAt, online: seenAt !== null && now - Date.parse(seenAt) <= ONLINE };
   };
   const counts = all<Row>(COUNTS, [iso(dayStart(now, rules.timezone))]);
+  const dispatchRows = all<Row>(
+    "SELECT id, source, type, subject, summary, dispatch_state, dispatch_project, received_at FROM events WHERE dispatch_state IN ('queued', 'running', 'creating') ORDER BY +id DESC LIMIT 20",
+  );
   const openCards = all<Row>("SELECT * FROM cards WHERE state = 'open' ORDER BY id DESC");
   const recentCards = all<Row>("SELECT * FROM cards WHERE state <> 'open' ORDER BY id DESC LIMIT 20");
   const timers = before
@@ -153,6 +163,16 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
   const hasMore = page.length > PAGE;
   const byId = new Map([...page.slice(0, PAGE), ...active].map((run) => [run.id, run]));
   const visible = [...byId.values()].sort((a, b) => b.id - a.id);
+  const progress = new Map<number, Row[]>();
+  if (visible.length) {
+    const ids = visible.map((run) => Number(run.id));
+    const placeholders = ids.map(() => "?").join(",");
+    for (const row of all<Row>(`SELECT * FROM run_progress WHERE run_id IN (${placeholders}) ORDER BY id DESC`, ids)) {
+      const list = progress.get(Number(row.run_id)) ?? [];
+      if (list.length < 20) list.push(row);
+      progress.set(Number(row.run_id), list);
+    }
+  }
   // A pause past its end is lifted at the next tick; until then it already doesn't hold. A schedule lets its moments pass
   // and keeps no events.
   const timed = new Set(rules.rules.filter((rule) => !eventRule(rule)).map((rule) => rule.name));
@@ -175,7 +195,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
     now: iso(now),
     timezone: rules.timezone,
     spending: spendingOf(all, now, rules.timezone),
-    totals: { ...tally(counts), attention: openCards.length },
+    totals: { ...tally(counts), attention: openCards.length, dispatching: dispatchRows.length },
     // The owner's own: which matter a card is about, and what its asker left for whoever carries on. Channels don't get them.
     cards: openCards.map((card) => ({ ...view(card), lane: card.lane, about: card.about })),
     recentCards: recentCards.map((card) => ({ ...view(card), lane: card.lane, about: card.about })),
@@ -228,6 +248,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       report: run.report ? JSON.parse(run.report) : null,
       stopping: run.cancel_at !== null,
       manual: Boolean(run.manual),
+      progress: (progress.get(Number(run.id)) ?? []).reverse(),
       events: all<Row>(EVENTS_OF_RUN, [run.id]),
     })),
     // What each open matter is waiting for, so a board can put the ones needing a person first.
@@ -235,6 +256,18 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
     // What a policy decided, and what it granted: read-only, for looking back at why work started or didn't. These are
     // the latest overall, like the open cards, not part of the run page: paging older runs must not hide them.
     decisions: all<Row>("SELECT * FROM decisions ORDER BY id DESC LIMIT 50"),
+    dispatchDecisions: all<Row>("SELECT * FROM dispatch_decisions ORDER BY id DESC LIMIT 50"),
+    dispatchCorrections: all<Row>("SELECT * FROM dispatch_corrections ORDER BY id DESC LIMIT 50"),
+    dispatchPreferences: all<Row>("SELECT * FROM dispatch_preferences ORDER BY id DESC LIMIT 50"),
+    projectCreations: all<Row>("SELECT * FROM project_creations ORDER BY id DESC LIMIT 50"),
+    dispatching: dispatchRows.map(
+      ({ dispatch_state: state, dispatch_project: project, received_at: receivedAt, ...event }) => ({
+        ...event,
+        state,
+        ...(project && { project }),
+        receivedAt,
+      }),
+    ),
     mandates: all<Row>("SELECT * FROM mandates ORDER BY granted_at DESC LIMIT 50"),
     hasMore,
     nextBefore: hasMore ? page[PAGE - 1].id : null,

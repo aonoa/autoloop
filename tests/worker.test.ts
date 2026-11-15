@@ -174,6 +174,7 @@ function fakeHub() {
     cancel: [] as number[],
     results: [] as any[],
     starts: [] as any[],
+    progresses: [] as any[],
     claims: [] as any[],
     failResults: 0,
     refuseResults: false,
@@ -187,6 +188,10 @@ function fakeHub() {
     },
     async started(run: number, token: string, body: object) {
       hub.starts.push({ run, token, ...body });
+      return { ok: true };
+    },
+    async progress(run: number, token: string, body: object) {
+      hub.progresses.push({ run, token, ...body });
       return { ok: true };
     },
     async result(run: number, token: string, body: any) {
@@ -249,6 +254,84 @@ test("a job runs in its rule's folder with the prompt and context file, and with
   assert.match(readFileSync(join(folder, "ctx.txt"), "utf8"), /忽略所有规则/);
   assert.deepEqual(hub.results[0], { run: given.run, token: given.token, outcome: "done", summary: "改好了" });
   assert.equal(w.entries().length, 0, "handed in and let go");
+});
+
+test("steps an agent prints are reported once while it runs, and the same step is not sent again", async () => {
+  const hub = fakeHub();
+  const scripted = join(home, "plugins", "progress-steps");
+  mkdirSync(scripted, { recursive: true });
+  writeFileSync(
+    join(scripted, "agent.ts"),
+    `
+export default {
+  command: (t) => ["/bin/sh", "-c", t.command[2]],
+  read(stdout, code) {
+    const steps = stdout.split("\\n").filter((step) => step && step !== "做完了").map((step) => ({ step }));
+    return { text: code === 0 ? "做完了" : undefined, progress: steps };
+  },
+};`,
+  );
+  const gateFile = join(folder, "progress.open");
+  const hold = `i=0; until [ -e "${gateFile}" ] || [ $i -ge 600 ]; do sleep 0.05; i=$((i + 1)); done`;
+  hub.jobs.push(
+    job({
+      use: "progress-steps",
+      command: ["/bin/sh", "-c", `echo 第一步; echo 第二步; ${hold}; echo 第三步; echo 做完了`],
+    }),
+  );
+  const w = worker(hub);
+  await until(w, () => hub.progresses.length >= 2);
+  assert.deepEqual(
+    hub.progresses.map((one) => one.step),
+    ["第一步", "第二步"],
+    "only the new steps, once",
+  );
+  writeFileSync(gateFile, "");
+  await until(w, () => hub.results.length === 1);
+  assert.deepEqual(
+    hub.progresses.map((one) => one.step),
+    ["第一步", "第二步", "第三步"],
+    "the later step is reported without repeating the first two",
+  );
+});
+
+test("the same step happening twice is reported twice, not mistaken for a repeat of the first", async () => {
+  const hub = fakeHub();
+  const scripted = join(home, "plugins", "progress-repeats");
+  mkdirSync(scripted, { recursive: true });
+  writeFileSync(
+    join(scripted, "agent.ts"),
+    `
+export default {
+  command: (t) => ["/bin/sh", "-c", t.command[2]],
+  read(stdout, code) {
+    const steps = stdout.split("\\n").filter((step) => step && step !== "做完了").map((step) => ({ step }));
+    return { text: code === 0 ? "做完了" : undefined, progress: steps };
+  },
+};`,
+  );
+  const gateFile = join(folder, "progress-repeats.open");
+  const hold = `i=0; until [ -e "${gateFile}" ] || [ $i -ge 600 ]; do sleep 0.05; i=$((i + 1)); done`;
+  hub.jobs.push(
+    job({
+      use: "progress-repeats",
+      command: ["/bin/sh", "-c", `echo 检查; echo 检查; ${hold}; echo 收尾; echo 做完了`],
+    }),
+  );
+  const w = worker(hub);
+  await until(w, () => hub.progresses.length >= 2);
+  assert.deepEqual(
+    hub.progresses.map((one) => one.step),
+    ["检查", "检查"],
+    "two occurrences are two steps",
+  );
+  writeFileSync(gateFile, "");
+  await until(w, () => hub.results.length === 1);
+  assert.deepEqual(
+    hub.progresses.map((one) => one.step),
+    ["检查", "检查", "收尾"],
+    "the later step comes once, and the earlier ones aren't sent again",
+  );
 });
 
 test("a bad exit code, or no last message, is a failure saying why", async () => {

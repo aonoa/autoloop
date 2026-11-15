@@ -87,6 +87,17 @@ export function formatWhy(id: number, facts: Fact[]) {
     const receipt = fact.type === "finish" && Boolean(changes.get(`runs:${id}`)?.row);
     for (const [changed, { table, key, row }] of changes) {
       const before = previous.get(changed);
+      if (table === "run_progress" && row?.run_id === id && !before) {
+        add(row.at, `进展：${row.step}`);
+        if (row.detail) {
+          lines.push(
+            ...String(row.detail)
+              .split("\n")
+              .slice(0, 8)
+              .map((line) => `                ${line}`),
+          );
+        }
+      }
       if (table === "events" && row && !before && events.has(row.id)) {
         add(row.received_at, `${taken.has(row.id) ? "触发事件" : "相关资料"}：${eventText(row)}`);
       }

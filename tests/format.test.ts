@@ -92,8 +92,8 @@ test("what decides what's stored brings a rebuild", () => {
     ],
     [
       "kernel/evolve.ts",
-      'new Set<Table>(["events", "runs", "cards", "timers", "decisions"])',
-      'new Set<Table>(["events", "runs", "cards", "timers", "decisions", "deliveries"])',
+      'dispatch_corrections: [["event_id"], ["suggested"], ["chosen"]],',
+      'dispatch_corrections: [["event_id"], ["suggested"], ["chosen"], ["created_at"]],',
     ],
     [
       "kernel/credentials.ts",

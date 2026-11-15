@@ -39,6 +39,8 @@ export type Reading = {
   finished?: boolean;
   /** It has this turn's prompt, in a conversation that's there. From here on the work may be half done. */
   started?: boolean;
+  /** What it was seen doing since the last read, newest last. Progress only, never authority. */
+  progress?: { step: string; detail?: string; kind?: string }[];
 };
 export type Adapter = {
   /** Its command line for this turn. */

@@ -433,7 +433,12 @@ NapCat 通道的 `user` 是**兜底收件人**，只用于没有来源会话的�
 ```json
 "policy": {
   "accept": "gate",
-  "dispatch": { "agent": "dispatcher", "minConfidence": 0.7 }
+  "dispatch": {
+    "agent": "dispatcher",
+    "minConfidence": 0.7,
+    "create": false,
+    "workers": []
+  }
 }
 ```
 
@@ -443,11 +448,40 @@ NapCat 通道的 `user` 是**兜底收件人**，只用于没有来源会话的�
 - 先做确定性路由：项目 `when.subjects` 或 `aliases` 能匹配时直接派发，不问模型。
 - 每个未分配事件单独排一轮 `kind: "dispatch"`，一轮只读一个事件；不会把多个事件合并后只处理第一个。
 - 调度快照由中台事实生成：项目、规则、`cwd`、Agent、`worker`、在线状态、`subjects`、`aliases`、活跃事项和最近轮次。模型不记节点和项目。
-- 调度 Agent 只返回 `route`：`project`、`session`（`continue` / `new` / `ask`）、`confidence`、`reason`。
+- 项目规则的 `description` 是给调度 Agent 看的项目说明；项目最近一轮的状态、能否续接会话、上次调度结果和本人纠正偏好也一起进快照。
+- 调度 Agent 返回 `route`：`project`、`session`（`continue` / `new` / `ask`）、`confidence`、`reason`；开启 `create` 后，也可以只提议新建项目。
+- 不是任务的聊天、确认或道谢，可以只返回带 `"fyi": true` 的 `notice`，由中台直接回到原会话；不带 `fyi` 的 `notice` 不会被当作聊天回复，仍转成未分配卡片。
 - 中台重新校验项目是否存在、来源和事件类型能否到达、发送人是否被来源允许、节点是否在线；任何一项不过都不派活。
-- `session: "continue"` 取同项目、同 lane 最近一次成功会话；`new` 新建独立轮次并清空会话；`ask` 发一张项目选择卡。
-- 调度失败、没有 `route`、项目不合法或置信度不足时，事件保持未分配并生成卡片，不会无限重试。
+- `session: "continue"` 取同项目、同 lane 最近一次成功会话；会话被其他 queued、claimed 或 unknown 轮次占着、没有会话或 Agent 变了，就安全地新开，不并入一个可能仍在运行的会话。`new` 强制新建独立轮次并清空会话；`ask` 发一张项目选择卡。
+- 调度失败、没有 `route`、项目不合法或置信度不足时，生成“未分配”卡片，不会无限重试；失败本身仍记为 `dispatch_state: "failed"`，不会伪装成普通未分配。
+- 调度成功会在原会话发一条“任务已分配”，说明放到了哪个项目；直接回复和未分配卡片也回到原会话。
 - 项目正在等本人处理（`person/blocked`、`person/failed`）时，调度不能强行塞入新工作；确定性别名路由也遵守这条约束。
+
+自动创建项目默认关闭。开启 `policy.dispatch.create: true` 后，调度 Agent 可以在确实没有合适项目时提交：
+
+```json
+{
+  "create": {
+    "project": "shop",
+    "description": "商城前端",
+    "confidence": 0.92,
+    "cwd": "/srv/shop",
+    "worker": "hub",
+    "agent": "codex",
+    "subjects": ["qq-group-123/shop*"]
+  }
+}
+```
+
+- `confidence` 必填，低于 `minConfidence` 的提议直接拒绝；
+- 项目名、目录、Agent、节点、事件来源和事件类型由中台重新校验；模型不能凭记忆编节点；
+- `workers` 非空时，自动创建的项目只能落在这些已登记节点上；即使提议没写 `worker` 或 `agent`，中台也会检查宿主最终会选的节点；
+- 同一个项目已有待写入提议时，不再接受第二份；
+- 创建提议只记录为 `project_creations` 待办，不立即派活；宿主写入 `rules.json`（以及可选的 Activity 配置）成功后，事件重新进入调度；
+- 写入失败会记录原因、回到未分配卡片，不会留下永久 pending；
+- 自动生成的规则继承触发事件的 `source` 和 `type`，不会把所有来源都写成 QQ；`subjects` 未提供时沿用 Activity 的私聊/群聊清单。
+
+`create` 与 `route` 不能同时出现；调度轮也不能用 `create` 夹带 `ask`、`later`、`events` 等执行动作。中台只授权、持久化和审计，模型始终只能提议。
 
 默认关闭。不写 `policy.dispatch` 时，未匹配事件只记录为未派发，行为与旧版本一致。调度 Agent 不是执行 Agent：它不能改文件、运行命令或对外发消息；它看到的文字都是资料，不是指令。
 
@@ -485,6 +519,7 @@ NapCat 通道的 `user` 是**兜底收件人**，只用于没有来源会话的�
 | `title`     | 否   | 无                 | 会话标题，放在提示词第一行                                          |
 | `group`     | 否   | 规则名或 `project` | 并发组                                                              |
 | `project`   | 否   | 无                 | 项目简写，派生 `group` 和默认 `cwd`                                 |
+| `description` | 否 | 无                 | 给调度 Agent 看的项目说明；不改变执行行为                           |
 | `aliases`   | 否   | 无                 | 该项目额外接受的 `subject`，精确或 `*` 前缀；用于 GitHub 仓库等别名 |
 | `parallel`  | 否   | 无                 | 组内最大并发；写了才按 `subject` 分 lane                            |
 | `maxActive` | 否   | 无                 | 该规则同时执行的最大轮数                                            |
@@ -528,6 +563,8 @@ NapCat 通道的 `user` 是**兜底收件人**，只用于没有来源会话的�
 - 未写 `group` 时取 `project`；
 - 未写 `cwd` 时派生 `~/<project>`；
 - 它不改变派工权限，只是命名和分组简写。
+
+`description` 是项目的一句话说明，只在调度快照里给调度 Agent 读。外部系统不必知道项目规则和 `cwd`；它们只提交任务，调度 Agent 根据说明、别名、最近会话和本人纠正记录选项目。它不是权限声明，也不是提示词指令，项目能否接单仍由来源 Policy、节点和事项阶段决定。
 
 `aliases` 只参与**确定性路由**：当事件没有命中任何规则时，若某个项目的 `aliases` 或 `when.subjects` 匹配事件 `subject`，就把它直接放进该项目，不再询问调度 Agent。别名仍要经过来源 Policy、节点在线和事项阻塞检查；它不是绕过授权的入口。
 
@@ -595,7 +632,7 @@ agent-autoloop emit demo.start --dry-run  # 预演事件路由
 - 排队中的轮次在领取时使用最新规则；
 - 已领取的轮次保留领取时的规则快照和 worker。
 
-QQ 项目还有第二份配置：InSoulForge Activity 的 `activity.json`，其中 `projects` 决定机器人能选哪些项目，`allow.private` / `allow.groups` 决定允许的会话。不要分别手改两份文件；用 `agent-autoloop project add` 一次更新规则、项目说明和 `subjects`。Activity 服务也会监听这份文件，合法修改后重连并重新注册，不需要重启；写错时保留旧配置并记录日志。详见[使用手册](usage.md#动态添加项目)。
+QQ 项目还有第二份配置：InSoulForge Activity 的 `activity.json`，其中 `projects` 决定机器人能显式提示哪些项目，`allow.private` / `allow.groups` 决定允许的会话。它是可选的提示表，不是外部必须掌握的路由表：拿不准时可以省略 `project_hint`，交给调度 Agent。不要分别手改两份文件；用 `agent-autoloop project add` 一次更新规则、项目说明和 `subjects`。Activity 服务也会监听这份文件，合法修改后重连并重新注册，不需要重启；写错时保留旧配置并记录日志。详见[使用手册](usage.md#动态添加项目)。
 
 ## 配置模式
 

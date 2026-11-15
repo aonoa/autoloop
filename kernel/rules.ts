@@ -21,7 +21,14 @@ export type Accept = "off" | "gate" | "assess";
  * With a dispatcher, a read-only round chooses a project (a rule with `project`) from the hub's facts; the hub then
  * checks the choice before any work starts. A confidence below the threshold is left for a person, never guessed.
  */
-export type Dispatch = { agent: string; minConfidence?: number };
+export type Dispatch = {
+  agent: string;
+  minConfidence?: number;
+  /** Let the dispatcher propose a project that is not registered yet. The hub checks it; the host writes the config. */
+  create?: boolean;
+  /** Only these workers may receive an automatically created project. Empty means any registered worker. */
+  workers?: string[];
+};
 export type Policy = {
   accept: Accept;
   assessor?: string;
@@ -59,6 +66,8 @@ type RuleOptions = RuleWords & {
   parallel?: number;
   maxActive?: number;
   resume?: boolean;
+  /** What this project is for, in plain words: the only description a dispatcher reads. */
+  description?: string;
   emits?: EventFilter;
   /** Run a round in the background first and only hand it to a person when it found something worth delivering. */
   speculate?: boolean;

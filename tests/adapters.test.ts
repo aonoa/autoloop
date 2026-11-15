@@ -148,7 +148,16 @@ const tasks = (...running: string[]) => ({
 
 test("Claude Code: a turn that got going says so, however it ended", () => {
   const cut = stream(hook, init, tool, toolResult);
-  assert.deepEqual(claude.read(cut, null, ""), { session: "s", started: true }, "still going, or vanished");
+  const going = claude.read(cut, null, "");
+  assert.deepEqual(
+    { session: going.session, started: going.started },
+    { session: "s", started: true },
+    "still going, or vanished",
+  );
+  assert.deepEqual(going.progress, [
+    { kind: "tool", step: "调用工具：Bash" },
+    { kind: "tool-done", step: "工具完成：机密" },
+  ]);
   const killed = claude.read(cut, 143, "");
   assert.equal(killed.session, "s");
   assert.equal(killed.started, true);
@@ -189,7 +198,12 @@ test("Claude Code: the raw messages of a broken run aren't the reason it failed"
 
 test("Claude Code: what it said before a background task ended isn't its answer", () => {
   const waiting = stream(init, tool, tasks("t1"), toolResult, said("已启动", 2));
-  assert.deepEqual(claude.read(waiting, null, ""), { session: "s", started: true }, "still going, so not over");
+  const stillGoing = claude.read(waiting, null, "");
+  assert.deepEqual(
+    { session: stillGoing.session, started: stillGoing.started },
+    { session: "s", started: true },
+    "still going, so not over",
+  );
   assert.equal(claude.read(waiting, 137, "").text, undefined, "killed while waiting: it never got to its answer");
   assert.equal(claude.read(waiting, 137, "").error, "没留下结果");
   assert.equal(claude.read(waiting, 0, "").text, "已启动", "it ended by itself: that was its last word");
@@ -198,7 +212,12 @@ test("Claude Code: what it said before a background task ended isn't its answer"
   assert.equal(claude.read(ended, null, "").text, "已启动");
   for (const next of [init, thinking, toolResult]) {
     const going = stream(init, tool, tasks("t1"), toolResult, said("已启动", 2), tasks(), next);
-    assert.deepEqual(claude.read(going, null, ""), { session: "s", started: true }, "a later turn is going");
+    const later = claude.read(going, null, "");
+    assert.deepEqual(
+      { session: later.session, started: later.started },
+      { session: "s", started: true },
+      "a later turn is going",
+    );
     assert.equal(claude.read(going, 1, "").error, "没留下结果", "and it broke");
   }
   const done = stream(init, tool, tasks("t1"), said("已启动", 2), tasks(), init, thinking, said("结束了"));
