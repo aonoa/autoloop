@@ -18,6 +18,15 @@ export type Card = {
   result: string | null;
   link: string | null;
   rule?: string;
+  /** The matter this card belongs to, when the rule splits work by subject; a chat can show which project is asking. */
+  lane?: string;
+  /** A source conversation the card belongs to, e.g. `qq-private-10001` or `qq-group-20002`; a channel decides whether it
+   * can reach it. */
+  reply?: string;
+  /** A receipt the hub keeps as already closed: it still has to reach the person, so it is not ordinary progress. */
+  fyi?: boolean;
+  /** When the card was created by the hub. Used by long-lived channels to avoid replaying cards from before a restart. */
+  createdAt?: string;
 };
 export type ChannelContext = {
   hub: Pick<Hub, "nextCard" | "delivered" | "failed" | "answer">;

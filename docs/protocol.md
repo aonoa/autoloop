@@ -167,6 +167,8 @@ POST /v1/events                    Authorization: Bearer <来源的密钥>
 - 没有规则匹配的事件也留着，`agent-autoloop status` 看得到。
 - 字段上限：`id` 200 个字、`subject` 100、`summary` 200、`detail` 4000、`link` 500，`type` 64 个字符。
 
+配置 `policy.dispatch` 后，没有匹配、也没有被 Policy 拒绝的外部事件会先排一轮 `kind: "dispatch"` 的只读调度轮。调度 Agent 只提交 `route`，由中台重新校验项目、来源、发送人、节点和置信度后，再走与普通事件相同的派发路径。未配置时行为不变：事件只记录，不自动放置。协议细节见[配置手册](configuration.md#调度-agentpolicydispatch)和[设计文档](design.md#dispatch调度-agent)。
+
 来源想知道发出去的事件后来怎么样了，用同一把密钥按应答里的 `event` 编号查，隔一段时间查一下还没结束的就行：
 
 ```
@@ -215,6 +217,36 @@ POST /v1/tell    { "task": "每周清理", "ask": { "title", "text", "options": 
 同一个 `key`（不写就按标题和内容）的卡片还开着就不再发。你答了，中台叫醒这个任务的 Agent 在 `cwd` 接着做，回答在这一轮的 `answers` 里；做完卡片改成已执行。没写 `cwd` 的任务问你返回 400。老中台不认识 `ask`，会返回 400：中台和接单程序分开部署时先升中台。
 
 ## Agent：领活、干活、交回执
+
+### 调度轮
+
+`kind: "dispatch"` 的轮次读取一个未分配事件，只判断它属于哪个项目。Job 里带 `context.dispatch` 快照：
+
+- `projects`：本来源和事件类型能到达的项目、规则、`cwd`、Agent、节点、在线状态、`subjects`、`aliases`；
+- `matters`：当前活跃事项及其阶段；
+- `recentRuns`：最近轮次摘要；
+- `minConfidence`：低于它不执行。
+
+调度轮没有 `thread`，不能把不存在的规则或事项引用回传给模型。回执只认一项 `route`：
+
+```json
+{
+  "route": {
+    "project": "mini",
+    "session": "continue",
+    "confidence": 0.94,
+    "reason": "用户明确提到 mini"
+  }
+}
+```
+
+- `session: "continue"` 接着同项目、同 lane 最近一次成功会话；
+- `session: "new"` 开新会话，不并入已有 queued 轮；
+- `session: "ask"` 发项目选择卡，由人决定；
+- 项目不存在、来源/类型不匹配、发送人无权限、节点离线或置信度不足时，不派活，转成未分配卡片；
+- 调度失败或无 `route` 不会无限重试。
+
+调度轮强制 `access: "read"`，但它不是操作系统级沙箱；`command` 类 Agent 的只读性由程序自身保证。
 
 每台电脑上有一个接单程序，它只往外连。一台接单程序可以服务多个 Agent。
 

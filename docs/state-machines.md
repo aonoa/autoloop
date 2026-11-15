@@ -12,6 +12,7 @@
 | 停止 | `claimed + cancel_at` 表示正在停；进程结束才 cancelled；排队可直接取消 | 本人 `cancel`，worker 停整个进程组后交结果；停止期间收到 failed 也归 cancelled，不能重派 |
 | 执行归属 | `agent/rules_version/issued/claim` 固定领取归属；`session/resume` 是续接提示 | `assignQueued/settleSession/claimNext/started/finish`。排队用最新规则，领取后保留原 worker 和规则快照；重复 claim 换 token |
 | 研判/预演 | 带 `kind` 的轮次与普通轮分开排队，按排队时的 Agent 领取，规则重载不改派；两类轮次都以 `read` 权限下发，不能改文件。研判 `accept` 才派正式轮；预演找到值得交付的东西才派正式轮。研判取消、停止、规则删除或连续失败都落在 `cancelled`，事件记一条 `unavailable` 并拒绝该规则；资料不参与结算，预演/研判的重试也不把事件标成已派发 | `enqueue/enqueueAssessment/applyVerdict/applyAssessment/retryLater/stopRun/cancel`；预演只把真正接下的事件交给正式轮 |
+| 调度 | 未匹配的外部事件排 `kind: "dispatch"`，一轮只读一个事件；`access` 强制 `read`，没有 `thread`。回执只给 `route`（`continue/new/ask`）。中台重新校验项目、来源、发送人、节点、事项阶段和置信度后才派活；失败、无 `route`、低置信度或不合法项目转成未分配卡片，不无限重试。别名和调度都不能绕过 `person/blocked` / `person/failed` | `enqueueDispatch/applyRoute/placeEvent/byAlias`；快照来自 `dispatchSnapshot`，不另存节点表 |
 | 决策/授权 | `decisions` 按「事件 × 规则」记下每次判断，终态 `unavailable` 只留一条；通常每个「事件 × 规则」一条，先有拒绝、后来确实派发时会再补一条 `accept`。`mandates` 只在真正接下时写，记规则版本与范围。外部事件在收到时写决定；内部事件（回答、定时、计划、补跑、手动运行）由 `dispatch` 保证至少有一条 `accept` 决定，已有 `accept` 不重复。研判 `accept` 后如果事项正等本人处理，决定保留但不写授权、不派活。研判的 `scope/reason` 随决定暴露，预演交付后补授权时沿用；真正派发统一走 `dispatch`，同时补决定、`routed`、授权和扇出。回答不扇出：它是原事项的私有输入 | `recordDecision/ensureDecision/recordMandate/dispatch/applyVerdict/markAssessmentUnavailable`；无 Policy 时也记来源密钥接受的决定 |
 
 `done + open 提问`、`done + 未来复查` 都合法：只结束这一轮。连续失败最多 10 次，终态轮次不能重排。本人要再做用新事件或手动 `run`。已交回的 `last_issued/last_result/last_answer` 保证同 token 同内容重交只确认一次，不同内容返回 409。

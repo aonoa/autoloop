@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { promptFor, readMessage, resultFrom } from "../worker/contract.ts";
 import type { Job } from "../protocol/job.ts";
 
-const job = (kind?: "assess"): Job =>
+const job = (kind?: "assess" | "dispatch"): Job =>
   ({
     run: 1,
     token: "t",
@@ -35,6 +35,25 @@ const job = (kind?: "assess"): Job =>
       waiting: [],
       open: [],
       decided: [],
+      ...(kind === "dispatch" && {
+        dispatch: {
+          minConfidence: 0.7,
+          projects: [
+            {
+              project: "mini",
+              rule: "QQ 任务 mini",
+              cwd: "~/mini",
+              agent: "a1",
+              worker: "w1",
+              online: true,
+              subjects: ["#mini*"],
+              aliases: [],
+            },
+          ],
+          matters: [{ project: "mini", rule: "QQ 任务 mini", lane: "", stage: "idle", lastRun: 2 }],
+          recentRuns: [{ run: 2, project: "mini", rule: "QQ 任务 mini", state: "done", summary: "做完了", at: null }],
+        },
+      }),
     },
   }) as Job;
 
@@ -50,6 +69,34 @@ test("an ordinary round keeps its work prompt", () => {
   const text = promptFor(job(), "/tmp/context.json");
   assert.match(text, /按手册做。/);
   assert.ok(!text.includes("判断该不该接"));
+});
+
+test("a dispatcher round is told to choose a project, not to do the work", () => {
+  const text = promptFor(job("dispatch"), "/tmp/context.json");
+  assert.match(text, /只判断，不做事/);
+  assert.match(text, /只能从下面的项目里选一个/);
+  assert.match(text, /QQ 任务 mini/);
+  assert.match(text, /"route"/);
+  assert.match(text, /"session":"continue 或 new 或 ask"/);
+  assert.ok(!text.includes("按手册做。"), "the dispatcher never gets the rule's work prompt");
+  assert.ok(!text.includes('```agent-autoloop\n{"ask"'), "the dispatcher is not given the work receipt template");
+});
+
+test("a route written in a receipt reaches the hub", () => {
+  const said = [
+    "放到 mini。",
+    "```agent-autoloop",
+    '{"route":{"project":"mini","session":"continue","confidence":0.93,"reason":"延续同一对话"}}',
+    "```",
+  ].join("\n");
+  const { result, problem } = resultFrom(readMessage(said), {});
+  assert.equal(problem, undefined);
+  assert.deepEqual(result.route, {
+    project: "mini",
+    session: "continue",
+    confidence: 0.93,
+    reason: "延续同一对话",
+  });
 });
 
 test("a verdict written in a receipt reaches the hub", () => {

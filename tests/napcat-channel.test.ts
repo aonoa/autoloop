@@ -1,6 +1,6 @@
 // NapCat's channel against a fake OneBot 11 server: a card reaches exactly the configured QQ user or group, only a `#N`
-// reply to the card this channel sent answers it, a bare `#N` is refused when more than one card is waiting, and a lost
-// delivery report doesn't put the card in the chat twice.
+// reply to the card this channel sent answers it, a bare `#N` is refused when more than one card is waiting, a lost
+// delivery report doesn't put the card in the chat twice, and a project matter's card says which project is asking.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -49,6 +49,12 @@ test("napcat: a card shows the rule, the words, numbered choices and the link", 
   assert.doesNotMatch(done, /#1\. 删/, "a settled card doesn't show choices again");
 });
 
+test("napcat: a card on a project matter says which project is asking", () => {
+  const said = words({ ...base, rule: "QQ 任务", lane: "qq-group-20002/shop" });
+  assert.match(said, /项目：shop/);
+  assert.doesNotMatch(words({ ...base, lane: "qq-group-20002" }), /项目：/, "a whole-group matter has no project name");
+});
+
 test("napcat: only a bare numbered choice answers, and a reply can quote its card", () => {
   assert.equal(choiceOf("#2"), 1);
   assert.equal(choiceOf("  # 12  "), 11);
@@ -68,14 +74,57 @@ test("napcat: only a bare numbered choice answers, and a reply can quote its car
     "123",
   );
   assert.equal(
-    replyOf({ post_type: "message", message_type: "private", user_id: 456, message: "#1" }, target),
-    null,
-    "another person's message is not this channel's",
+    replyOf({ post_type: "message", message_type: "private", user_id: 456, message: "#1" }, target)?.user,
+    "456",
+    "another person's message is read so they can be told it isn't theirs",
+  );
+  assert.equal(
+    replyOf({ post_type: "message", message_type: "private", user_id: 456, message: "#1" }, target, new Set(["456"]))
+      ?.user,
+    "456",
+    "a person a card was sent to can answer it",
   );
   assert.equal(
     replyOf({ post_type: "message", message_type: "group", group_id: 9, user_id: 123, message: "#1" }, target),
     null,
   );
+});
+
+test("napcat: a group card answers in that group, and a private conversation's #1 never answers it", async () => {
+  const onebot = await fakeOneBot();
+  const stop = new AbortController();
+  stops.push(stop);
+  const calls: unknown[][] = [];
+  let done = () => {};
+  const answered = new Promise<void>((resolve) => (done = resolve));
+  const hub = hubOf([{ ...base, reply: "qq-group-20002" }], answered, calls);
+  const run = napcat({
+    hub: hub as any,
+    options: { url: onebot.http, ws: onebot.ws, user: "123" },
+    log: () => {},
+    signal: stop.signal,
+  });
+  await onebot.ready;
+  const wait = async (predicate: () => boolean) => {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !predicate()) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(predicate(), "the expected call arrived");
+  };
+  await wait(() => onebot.received.some(({ action }) => action === "send_group_msg"));
+  const sent = onebot.received.find(({ action }) => action === "send_group_msg");
+  assert.equal(sent?.body.group_id, 20002, "a source group card goes to that group");
+  assert.equal(
+    onebot.received.some(({ action }) => action === "send_private_msg"),
+    false,
+    "and not to the configured fallback person",
+  );
+  onebot.say({ post_type: "message", message_type: "private", user_id: 123, message_id: 950, raw_message: "#1" });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(calls.filter((call) => call[0] === "answer").length, 0, "a private #1 doesn't reach a group card");
+  stop.abort();
+  done();
+  await run;
+  onebot.server.close();
 });
 
 type Received = { action: string; body: any };
@@ -241,6 +290,45 @@ test("napcat: a bare reply answers the only waiting card, and a quoted reply cho
     calls.find((call) => call[0] === "answer"),
     ["answer", 6, { choice: 1, by: "123", ref: "napcat-card-6" }],
   );
+  onebot.server.close();
+});
+
+test("napcat: a card with a source private chat goes there, and only that person may answer it", async () => {
+  const onebot = await fakeOneBot();
+  const stop = new AbortController();
+  stops.push(stop);
+  const calls: unknown[][] = [];
+  let done = () => {};
+  const answered = new Promise<void>((resolve) => (done = resolve));
+  const hub = hubOf([{ ...base, reply: "qq-private-10001" }], answered, calls);
+  const run = napcat({
+    hub: hub as any,
+    options: { url: onebot.http, ws: onebot.ws, user: "123" },
+    log: () => {},
+    signal: stop.signal,
+  });
+  await onebot.ready;
+  const wait = async (predicate: () => boolean) => {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !predicate()) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(predicate(), "the expected call arrived");
+  };
+  await wait(() => onebot.received.some(({ action }) => action === "send_private_msg"));
+  assert.equal(onebot.received.find(({ action }) => action === "send_private_msg")?.body.user_id, 10001);
+  onebot.say({ post_type: "message", message_type: "private", user_id: 20002, message_id: 910, raw_message: "#1" });
+  await wait(() =>
+    onebot.received.some(({ body }) => /这张卡片不是发给你的/.test(body.message?.[0]?.data?.text ?? "")),
+  );
+  assert.equal(calls.filter((call) => call[0] === "answer").length, 0, "another person can't answer this card");
+  onebot.say({ post_type: "message", message_type: "private", user_id: 10001, message_id: 911, raw_message: "#1" });
+  await wait(() => calls.some((call) => call[0] === "answer"));
+  assert.deepEqual(
+    calls.find((call) => call[0] === "answer"),
+    ["answer", 5, { choice: 0, by: "10001", ref: "napcat-card-5" }],
+  );
+  stop.abort();
+  done();
+  await run;
   onebot.server.close();
 });
 

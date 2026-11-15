@@ -1,6 +1,6 @@
 // `rules explain` and `emit --dry-run`: what this machine's rules file says, without asking a hub or writing a fact.
 import { describeCron, nextRun, parseCron } from "../kernel/cron.ts";
-import { cronOf, eventRule, typeMatches, type Rule, type Rules } from "../kernel/rules.ts";
+import { cronOf, eventRule, subjectMatches, typeMatches, type Rule, type Rules } from "../kernel/rules.ts";
 import { parseRules } from "../protocol/rules.ts";
 import { parseEvent } from "../protocol/validate.ts";
 
@@ -76,7 +76,11 @@ export function previewEvent(
   const lines = [`事件：${source} ${parsed.type}${parsed.subject ? ` ${parsed.subject}` : ""}`];
   if (!rules.sources[source]) lines.push(`来源 ${source} 没有登记在 rules.json 的 sources 里`);
   const matched = rules.rules.filter(
-    (rule) => eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, parsed.type),
+    (rule) =>
+      eventRule(rule) &&
+      rule.when.source === source &&
+      typeMatches(rule.when.types, parsed.type) &&
+      subjectMatches(rule.when.subjects, parsed.subject),
   );
   if (!matched.length) {
     lines.push("没有规则接这条事件；真发出去会记成「没有规则接的事件」。");

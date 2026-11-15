@@ -88,6 +88,32 @@ test("a dry run says which rules would take the event, and doesn't need a hub", 
   assert.throws(() => previewEvent(fixture, "app", { id: "4", type: "not a type" }, at(0), "UTC"), InputError);
 });
 
+test("a dry run applies subject filters instead of listing every rule on the source", () => {
+  const given = JSON.parse(fixture);
+  given.rules[0].when.subjects = ["#1*"];
+  given.rules.push({
+    ...given.rules[0],
+    name: "别的项目",
+    group: "别的项目",
+    when: { source: "app", types: ["feedback.new"], subjects: ["#2*"] },
+  });
+  const one = previewEvent(
+    JSON.stringify(given),
+    "app",
+    { id: "1", type: "feedback.new", subject: "#1" },
+    at(0),
+    "UTC",
+  ).join("\n");
+  assert.match(one, /意见 → a1/);
+  assert.doesNotMatch(one, /别的项目/);
+  assert.match(
+    previewEvent(JSON.stringify(given), "app", { id: "2", type: "feedback.new", subject: "#3" }, at(0), "UTC").join(
+      "\n",
+    ),
+    /没有规则接/,
+  );
+});
+
 test("the commands read the local rules file and refuse an unknown subcommand", async () => {
   writeFileSync(
     join(home, "config.json"),

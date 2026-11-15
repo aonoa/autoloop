@@ -40,11 +40,20 @@ export type Result = {
   usage?: Usage;
   report?: Report;
   verdict?: Verdict;
+  route?: Route;
   ask?: Ask[];
   notice?: Notice[];
   resolve?: { card: number; reason: string }[];
   later?: Later[];
   events?: EventInput[];
+};
+
+/** A dispatcher's placement of an unplaced event. The hub checks the project, its rule and the sender before using it. */
+export type Route = {
+  project: string;
+  session: "continue" | "new" | "ask";
+  confidence: number;
+  reason?: string;
 };
 export type Rejected = { card?: number; what?: string; reason: string };
 
@@ -58,10 +67,13 @@ export type EventInput = {
   hops: number;
   /** Who caused it, in the source's own identity: a login name, a chat member id, or empty when the source has none. */
   actor: string;
+  /** Where a reply belongs when the source names a conversation: `qq-private-<number>` or `qq-group-<number>`, never
+   * free text. */
+  reply?: string;
 };
 
-const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500, actor: 200 } as const;
-const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor"];
+const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500, actor: 200, reply: 100 } as const;
+const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor", "reply"];
 
 export function parseEvent(input: unknown): EventInput {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -87,6 +99,7 @@ export function parseEvent(input: unknown): EventInput {
     link: field("link"),
     hops: hops as number,
     actor: field("actor"),
+    ...(given.reply !== undefined && { reply: field("reply") }),
   };
   // Half a Unicode character is stored and looked up as different bytes, so the same id would never be recognised again.
   if (!event.id.isWellFormed()) throw new InputError("id 里有不完整的字符");
@@ -99,6 +112,9 @@ export function parseEvent(input: unknown): EventInput {
   }
   // An actor names who caused it, so it is held to the same shape as a subject: an identity, never prose.
   if (!/^[A-Za-z0-9#._:\/@-]*$/.test(event.actor)) throw new InputError("actor 只能用字母、数字和 # . _ : / @ -");
+  if (event.reply !== undefined && !/^qq-(private|group)-[1-9][0-9]*$/.test(event.reply)) {
+    throw new InputError("reply 只能是 qq-private-<QQ 号> 或 qq-group-<群号>");
+  }
   return event;
 }
 
@@ -166,6 +182,22 @@ const validVerdict = (verdict: unknown): boolean => {
   );
 };
 
+const SESSIONS = ["continue", "new", "ask"];
+const validRoute = (route: unknown): boolean => {
+  if (!isItem(route)) return false;
+  const item = route as Item;
+  return (
+    only(item, ["project", "session", "confidence", "reason"]) &&
+    text(item.project, 100) &&
+    SESSIONS.includes(item.session as string) &&
+    typeof item.confidence === "number" &&
+    Number.isFinite(item.confidence) &&
+    item.confidence >= 0 &&
+    item.confidence <= 1 &&
+    optional(item.reason, 1000)
+  );
+};
+
 const validNotice = (notice: Item) =>
   only(notice, ["title", "text", "key", "fyi"]) &&
   text(notice.title, 200) &&
@@ -210,6 +242,7 @@ export function parseResult(input: unknown): Result {
       "events",
       "report",
       "verdict",
+      "route",
     ])
   ) {
     throw new InputError("结果里有不认识的字段");
@@ -236,6 +269,11 @@ export function parseResult(input: unknown): Result {
   }
   if (result.verdict !== undefined && !validVerdict(result.verdict)) {
     throw new InputError(`verdict 要有 decision（${DECISIONS.join("、")}），reason、scope 最多 1000 字`);
+  }
+  if (result.route !== undefined && !validRoute(result.route)) {
+    throw new InputError(
+      "route 要有 project、session（continue、new、ask）、0 到 1 的 confidence，reason 最多 1000 字",
+    );
   }
   if (result.events !== undefined) {
     if (!items(result.events, 100)) throw new InputError("events 最多 100 项");

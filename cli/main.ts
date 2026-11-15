@@ -71,6 +71,7 @@ const HELP = `Agent 自动化中台
   agent-autoloop key list                有哪些密钥
   agent-autoloop key remove <种类> <名字>  立即收回一把密钥
   agent-autoloop add <git 地址>           安装插件，不自动更新
+  agent-autoloop project add|list|remove  管理 QQ 项目；同时更新规则和 Activity 配置，不用重启
   agent-autoloop mcp                      用标准输入输出连接 MCP 客户端
   agent-autoloop join <中台地址> --worker <名字> --key <密钥> [--no-service]
                                     另一台电脑只接活时用
@@ -125,6 +126,26 @@ const RESTORE_USAGE = `用法：agent-autoloop restore <目录> [--yes]
 /** What each command reads besides its own words, and how to use it. */
 const TAKES: Record<string, { flags: string[]; usage: string }> = {
   add: { flags: [], usage: "用法：agent-autoloop add <git 地址>" },
+  project: {
+    flags: [
+      "description",
+      "worker",
+      "cwd",
+      "agent",
+      "rule",
+      "source",
+      "subjects",
+      "no-resume",
+      "activity-config",
+      "json",
+    ],
+    usage: `用法：agent-autoloop project <add|list|remove> [参数]
+
+  add <项目短名> --description <说明> [--worker <节点>] [--cwd <目录>] [--agent <Agent>] [--rule <规则名>]
+                 [--activity-config <文件>] [--subjects <对象1,对象2>] [--no-resume]
+  list [--json] [--activity-config <文件>]
+  remove <项目短名> [--activity-config <文件>]`,
+  },
   answer: { flags: ["text"], usage: "用法：agent-autoloop answer <卡片> [序号] [--text 别的想法]" },
   ask: {
     flags: ["task"],
@@ -1010,6 +1031,7 @@ const [command, ...args] = process.argv.slice(2);
 const commands: Record<string, () => unknown> = {
   mcp: async () => (await import("./mcp.ts")).mcp(),
   add: () => addPlugin(args),
+  project: async () => (await import("./project.ts")).projectCommand(args),
   init: () => init(args),
   join: () => join(args),
   up: async () => (await import("../host/up.ts")).up(),

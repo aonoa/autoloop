@@ -1,0 +1,9 @@
+{
+  "id": "web-issue-7-opened",
+  "type": "issues.opened",
+  "subject": "owner/web#7",
+  "summary": "文档搜索没有结果",
+  "detail": "演示资料：搜索“部署”时返回空列表。接入时换成真实 issue 正文。",
+  "link": "https://github.com/owner/web/issues/7",
+  "actor": "bob"
+}

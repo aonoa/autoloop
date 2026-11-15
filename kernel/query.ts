@@ -1,9 +1,18 @@
 // Reading the view: what the decisions and the doors ask of it, and the shapes they hand out.
 import { credential, type Environment } from "./credentials.ts";
 import { rows, type Fact, type Row, type View } from "./evolve.ts";
-import { ruleOf, type Rule, type Rules } from "./rules.ts";
-import { stageOf } from "./stage.ts";
+import { DISPATCH_NAME, eventRule, ruleOf, typeMatches, type Rule, type Rules } from "./rules.ts";
+import { stageOf, stagesOf } from "./stage.ts";
 import type { Job } from "../protocol/job.ts";
+
+/** Seen this recently counts as online; the same window the state board uses. */
+const ONLINE = 120_000 + 60_000;
+
+/** Whether a worker has checked in recently enough for the hub to place work on it. */
+export function workerOnline(view: View, worker: string, now: number): boolean {
+  const seen = view.get("seen", `worker:${worker}`);
+  return !!seen && now - Date.parse(seen.seen_at) <= ONLINE;
+}
 
 export function configuration(view: View, version?: number): Rules {
   const current = view.get("config", "rules");
@@ -115,7 +124,7 @@ export function openInScope(view: View, run: Row) {
 }
 
 export function cardView(card: Row, env: Environment, ref: string | null = null, links = false) {
-  const { id, version, kind, state, title, text, recommend, choice, answer, by, result } = card;
+  const { id, version, kind, state, title, text, recommend, choice, answer, by, result, reply, lane, fyi } = card;
   const options: string[] = kind === "ask" ? JSON.parse(card.options) : state === "open" ? ["已处理"] : [];
   const link = links ? `${env.publicUrl.replace(/\/$/, "")}/c/${credential(env, "card", id, card.created_at)}` : null;
   const when = { createdAt: card.created_at, decidedAt: card.decided_at, closedAt: card.closed_at };
@@ -135,6 +144,9 @@ export function cardView(card: Row, env: Environment, ref: string | null = null,
     result,
     link,
     rule: card.rule,
+    ...(lane && { lane }),
+    ...(reply && { reply }),
+    ...(fyi ? { fyi: true } : {}),
     ...when,
   };
 }
@@ -182,7 +194,19 @@ function threadOf(view: View, rules: Rules, run: Row, now: number): NonNullable<
 
 export function jobOf(view: View, run: Row, env: Environment, now = Date.parse(run.created_at)): Job {
   const rules = configuration(view, run.rules_version);
-  const { name, cwd, skill, prompt, title, emits } = ruleOf(rules, run.rule)!;
+  // A dispatcher round is not a rule's work even if a rule happens to use the internal name.
+  const definition = run.kind === "dispatch" ? undefined : ruleOf(rules, run.rule);
+  // A dispatch round names no real matter: its own thread would only offer a made-up rule and lane back to the model.
+  const runThread = run.kind === "dispatch" ? undefined : threadOf(view, rules, run, now);
+  // A dispatcher is not a rule's work: it needs a place to read from and a name, but no rule prompt or cwd.
+  const { name, cwd, skill, prompt, title, emits } = definition ?? {
+    name: run.kind === "dispatch" ? DISPATCH_NAME : run.rule,
+    cwd: "",
+    skill: undefined,
+    prompt: undefined,
+    title: undefined,
+    emits: undefined,
+  };
   const { maxActive: _maxActive, ...agent } = rules.agents[run.agent];
   // An assessor reads and judges; a speculative try rehearses. Neither may change files or reach the outside world.
   const access = run.kind ? "read" : agent.access;
@@ -203,11 +227,11 @@ export function jobOf(view: View, run: Row, env: Environment, now = Date.parse(r
     attempt: run.attempts + 1,
     ...(run.kind && { kind: run.kind }),
     rule: { name, cwd, skill, prompt, title, emits },
-    ...(styleOf(rules, ruleOf(rules, run.rule)!) && { style: styleOf(rules, ruleOf(rules, run.rule)!) }),
+    ...(definition && styleOf(rules, definition) && { style: styleOf(rules, definition) }),
     agent: { ...agent, id: run.agent, access },
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
-    thread: threadOf(view, rules, run, now),
+    ...(runThread && { thread: runThread }),
     context: {
       events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
         const sourceName = rules.sources[source]?.name ?? source;
@@ -240,6 +264,9 @@ export function jobOf(view: View, run: Row, env: Environment, now = Date.parse(r
         .map(({ id, title, choice, answer, options, decided_at }) => {
           return { card: id, title, choice: choice === null ? answer : JSON.parse(options)[choice], at: decided_at };
         }),
+      ...(run.kind === "dispatch" && {
+        dispatch: dispatchSnapshot(view, rules, sourceOf(view, run.id) ?? "", events[0]?.type ?? "", now),
+      }),
     },
   };
 }
@@ -261,5 +288,62 @@ export function unrouted(view: View, limit = 20) {
     .sort((a, b) => b.id - a.id)
     .slice(0, limit);
 }
+
+/**
+ * What a dispatcher may choose from, read from the hub's own facts: projects are rules with a `project`, their node comes
+ * from the agent, and a project is offered only when its rule is an event rule that this source and type can reach. The
+ * model never remembers a node or a project: it reads this snapshot for one round.
+ */
+export function dispatchSnapshot(view: View, rules: Rules, source: string, type: string, now: number) {
+  const projects = rules.rules
+    .filter(
+      (rule): rule is Rule & { project: string; when: { source: string; types: string[]; subjects?: string[] } } =>
+        !!rule.project && eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, type),
+    )
+    .map((rule) => {
+      const agent = rules.agents[rule.to];
+      return {
+        project: rule.project!,
+        rule: rule.name,
+        cwd: rule.cwd,
+        agent: rule.to,
+        worker: agent.worker,
+        online: workerOnline(view, agent.worker, now),
+        subjects: rule.when.subjects ?? [],
+        aliases: rule.aliases ?? [],
+      };
+    });
+  const matters = stagesOf(view, rules, now)
+    .filter((matter) => view.get("runs", matter.last)?.kind !== "dispatch")
+    .map((matter) => {
+      const definition = ruleOf(rules, matter.rule);
+      return {
+        ...(definition?.project && { project: definition.project }),
+        rule: matter.rule,
+        lane: matter.lane,
+        stage: matter.stage,
+        lastRun: matter.last,
+      };
+    });
+  const recentRuns = rows(view, "runs")
+    .filter((run) => !run.kind)
+    .sort((a, b) => b.id - a.id)
+    .slice(0, 20)
+    .map((run) => {
+      const definition = ruleOf(rules, run.rule);
+      return {
+        run: run.id,
+        ...(definition?.project && { project: definition.project }),
+        rule: run.rule,
+        state: run.state,
+        summary: run.summary ?? "",
+        at: run.finished_at ?? null,
+      };
+    });
+  return { minConfidence: rules.policy?.dispatch?.minConfidence ?? 0.7, projects, matters, recentRuns };
+}
+
+/** The project a rule belongs to, and the project's rules. */
+export const projectRules = (rules: Rules, project: string) => rules.rules.filter((rule) => rule.project === project);
 
 export const safeFact = (fact: Fact) => ({ ...fact, changes: fact.changes.filter(({ table }) => table !== "keys") });

@@ -178,6 +178,33 @@ test("a run stopped by its failed receipt keeps that receipt's usage, session an
     view.close();
   }
 });
+
+test("two nodes each claim only the projects assigned to their own agents", () => {
+  let view = seeded();
+  const act = (type: string, ...args: unknown[]) => {
+    const decided = decide(view, { type, args }, 1000, environment);
+    view = evolve(view, decided.facts);
+    return decided.value;
+  };
+  try {
+    // 意见 goes to a1 on w1; 告警 goes to a2 on w2. Both are live at once.
+    act("ingest", "app", { id: "one", type: "feedback.new" });
+    act("ingest", "ops", { id: "two", type: "alert.raised" });
+    const first = act("claimNext", "w1", "claim-w1");
+    assert.equal(first.agent.id, "a1");
+    assert.equal(first.rule.name, "意见");
+    const second = act("claimNext", "w2", "claim-w2");
+    assert.equal(second.agent.id, "a2");
+    assert.equal(second.rule.name, "告警");
+    assert.notEqual(first.run, second.run);
+    // w1 may have more of its own work, but it cannot reach into w2's queue.
+    const more = act("claimNext", "w1", "claim-w1-again");
+    assert.equal(more?.agent.worker, "w1");
+    assert.notEqual(more?.rule.name, "告警");
+  } finally {
+    view.close();
+  }
+});
 test("facts replay the whole receipt with no capability plaintext", () => {
   let view = empty();
   const log: Fact[] = [];

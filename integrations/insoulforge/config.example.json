@@ -1,0 +1,33 @@
+{
+  "activity": {
+    "url": "ws://127.0.0.1:7778/activities/ws",
+    "token": "REPLACE_WITH_INSOULFORGE_ACTIVITY_TOKEN",
+    "name": "autoloop",
+    "statusEveryMs": 20000
+  },
+  "hub": {
+    "url": "http://127.0.0.1:3350",
+    "sourceKey": "REPLACE_WITH_AUTOLOOP_SOURCE_KEY",
+    "ownerKey": "REPLACE_WITH_AUTOLOOP_OWNER_KEY"
+  },
+  "allow": {
+    "private": ["10001001"],
+    "groups": ["20002002"],
+    "actor": "10001001",
+    "senders": ["10001001"]
+  },
+  "projects": {
+    "general": {
+      "description": "通用任务：天气、资料、新闻、查询等，不属于任何代码仓库",
+      "rule": "QQ 通用任务"
+    },
+    "shop": {
+      "description": "商城前端、结算与订单流程",
+      "rule": "QQ 任务"
+    },
+    "site": {
+      "description": "官网、首页与内容页面",
+      "rule": "QQ 任务"
+    }
+  }
+}

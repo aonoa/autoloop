@@ -34,6 +34,9 @@ const isSomeWords: Check = (value) => isWords(value) && (value as string[]).leng
 const isId: Check = (value) => typeof value === "string" && ID.test(value);
 const isCount: Check = (value) => Number.isInteger(value) && (value as number) > 0;
 const isTypes: Check = (value) => isSomeWords(value) && (value as string[]).every((type) => TYPE_PATTERN.test(type));
+const SUBJECT_PATTERN = /^[A-Za-z0-9#._:/@-]{1,300}\*?$/;
+const isSubjects: Check = (value) =>
+  isSomeWords(value) && (value as string[]).every((subject) => SUBJECT_PATTERN.test(subject));
 const isCron: Check = (value) => typeof value === "string" && parseCron(value) !== null;
 // One word, as a client may name a session after the first word of its first message. It leads the prompt, which goes to
 // the Agent's command line as an argument: started with a subject from outside it could be read as an option or command.
@@ -47,6 +50,10 @@ const FOLDER = "要是绝对目录（如 ~/code、/srv/app、C:\\code 或 \\\\�
 
 function isKeyOf(table: object): Check {
   return (value) => typeof value === "string" && value in table;
+}
+
+function isConfidence(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 function isZone(zone: unknown) {
@@ -89,6 +96,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["title", isTitle, "要是字母或数字开头、不含空白的一个词，占位符只能用 {id}、{subject}", true],
     ["group", isText, NOT_EMPTY, true],
     ["project", isText, NOT_EMPTY, true],
+    ["aliases", isSubjects, "要是对象列表，每一项精确匹配或以 * 结尾", true],
     ["parallel", isCount, "要是正整数", true],
     ["maxActive", isCount, "要是正整数", true],
     ["resume", (value) => typeof value === "boolean", "只能是 true 或 false", true],
@@ -101,6 +109,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     checkFields(issues, `${where}的 when `, when, [
       ["source", isKeyOf(rules.sources), `不是已登记的来源：${when.source}`],
       ["types", isTypes, "要是事件类型的列表，可以用 x.* 或 *"],
+      ["subjects", isSubjects, "要是 subject 的列表，可以用前缀加 *", true],
     ]);
   } else if (isObject(when)) {
     if (isCron(when.cron) && nextRun(parseCron(when.cron as string)!, now, rules.timezone) === null) {
@@ -167,8 +176,9 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
       ["accept", (value) => ACCEPT.includes(value as string), `只能是 ${ACCEPT.join("、")}`, true],
       ["assessor", isText, NOT_EMPTY, true],
       ["fanout", (value) => typeof value === "boolean", "要是 true 或 false", true],
+      ["dispatch", isObject, "要是一个对象", true],
     ]);
-    const policy = parsed.policy as { accept?: string; assessor?: string };
+    const policy = parsed.policy as { accept?: string; assessor?: string; dispatch?: unknown };
     if ((policy.accept ?? "off") === "assess" && policy.assessor === undefined) {
       issues.push("rules.json 的 policy 写了 accept: assess，还要写 assessor：用哪个 Agent 研判");
     }
@@ -177,6 +187,19 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
     }
     if (policy.assessor !== undefined && (policy.accept ?? "off") !== "assess") {
       issues.push("rules.json 的 policy 写了 assessor，就要把 accept 写成 assess");
+    }
+    if (isObject(policy.dispatch)) {
+      checkFields(issues, "rules.json 的 policy.dispatch ", policy.dispatch, [
+        ["agent", isText, NOT_EMPTY],
+        ["minConfidence", isConfidence, "要是 0 到 1 之间的数", true],
+      ]);
+      const dispatch = policy.dispatch as { agent?: string; minConfidence?: number };
+      if (dispatch.agent !== undefined && !Object.hasOwn(rules.agents, dispatch.agent)) {
+        issues.push(`rules.json 的 policy.dispatch.agent 不是已登记的 Agent：${dispatch.agent}`);
+      }
+      if (dispatch.minConfidence !== undefined && dispatch.minConfidence > 1) {
+        issues.push("rules.json 的 policy.dispatch.minConfidence 要在 0 到 1 之间");
+      }
     }
     // `accept` is the gate's switch; `fanout` alone must not turn it on.
     rules.policy!.accept ??= "off";
