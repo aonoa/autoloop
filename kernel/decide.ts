@@ -283,6 +283,7 @@ function recordEvent(
     actor: event.actor ?? "",
     // `parseEvent` may drop a field whose value is empty; `ingest` passes the parsed event, which carries a validated reply.
     ...(event.reply && { reply: event.reply }),
+    ...(event.attachments && { attachments: event.attachments }),
     // What the rules matched. `routed` is what was actually dispatched, and is filled in as work is queued.
     matched: JSON.stringify(matched),
     routed: "[]",
@@ -724,6 +725,7 @@ function askPlacement(draft: Draft, event: Row, run: Row, title: string, why: st
     grp: "dispatch",
     run_id: run.id,
     ...(event.reply && { reply: event.reply }),
+    ...(event.attachments && { attachments: event.attachments }),
     about: `调度事件 ${event.id}`,
   });
 }
@@ -804,6 +806,7 @@ function placedNotice(draft: Draft, event: Row, project: string) {
       source: event.source,
       lane: event.subject,
       ...(event.reply && { reply: event.reply }),
+      ...(event.attachments && { attachments: event.attachments }),
     },
   );
 }
@@ -1042,6 +1045,15 @@ function fanOut(draft: Draft, eventId: number, event: Row, already: Set<string>)
     // Context, not a matching event of this rule: it is read, but never becomes authority for its work.
     put(draft, "run_events", `${run.id}:${eventId}`, { run_id: run.id, event_id: eventId, context: 1 });
   }
+}
+
+function runAttachment(draft: Draft, id: number, token: string, attachment: string) {
+  const run = heldRun(draft, id, token, ["claimed", "unknown"]);
+  const found = eventsOf(draft.view, run.id).some((event: Row) =>
+    (event.attachments ?? []).some((one: { id: string }) => one.id === attachment),
+  );
+  if (!found) throw new NotFound("这一轮没有这个附件");
+  return true;
 }
 
 function heldRun(draft: Draft, id: number, token: string, states: string[]) {
@@ -1799,6 +1811,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     put(draft, "seen", `channel:${name}`, { kind: "channel", name, seen_at: draft.at });
   },
   claimNext,
+  runAttachment,
   projectCreated(draft, eventId, project) {
     createdProject(draft, eventId, project);
   },
@@ -1823,6 +1836,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       notify(draft, `dispatch:${eventId}:create-failed`, "新建项目失败", reason || "新建项目失败", {
         once: true,
         ...(event.reply && { reply: event.reply }),
+        ...(event.attachments && { attachments: event.attachments }),
       });
   },
   started(draft, id, token, given) {

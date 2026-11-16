@@ -46,6 +46,13 @@
           "type": "string",
           "maxLength": 100,
           "pattern": "^qq-(private|group)-[1-9][0-9]*$"
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/attachment"
+          }
         }
       },
       "required": ["id", "type"],
@@ -703,34 +710,82 @@
                 },
                 "workers": {
                   "type": "array",
-                  "items": { "type": "string" }
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 "projects": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "project": { "type": "string" },
-                      "rule": { "type": "string" },
-                      "cwd": { "type": "string" },
-                      "agent": { "type": "string" },
-                      "worker": { "type": "string" },
-                      "online": { "type": "boolean" },
-                      "subjects": { "type": "array", "items": { "type": "string" } },
-                      "aliases": { "type": "array", "items": { "type": "string" } },
-                      "description": { "type": "string" },
-                      "lastRun": { "type": "integer", "minimum": 1 },
-                      "lastSession": { "type": ["string", "null"] },
-                      "lastState": { "type": "string" },
-                      "lastSummary": { "type": ["string", "null"] },
-                      "canContinue": { "type": "boolean" },
+                      "project": {
+                        "type": "string"
+                      },
+                      "rule": {
+                        "type": "string"
+                      },
+                      "cwd": {
+                        "type": "string"
+                      },
+                      "agent": {
+                        "type": "string"
+                      },
+                      "worker": {
+                        "type": "string"
+                      },
+                      "online": {
+                        "type": "boolean"
+                      },
+                      "subjects": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "aliases": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "lastRun": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "lastSession": {
+                        "type": ["string", "null"]
+                      },
+                      "lastState": {
+                        "type": "string"
+                      },
+                      "lastSummary": {
+                        "type": ["string", "null"]
+                      },
+                      "canContinue": {
+                        "type": "boolean"
+                      },
                       "lastDispatch": {
                         "type": "object",
                         "properties": {
-                          "run": { "type": "integer", "minimum": 1 },
-                          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-                          "reason": { "type": "string" },
-                          "at": { "type": "string" }
+                          "run": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "at": {
+                            "type": "string"
+                          }
                         },
                         "required": ["run", "confidence", "reason", "at"],
                         "additionalProperties": false
@@ -740,10 +795,19 @@
                         "items": {
                           "type": "object",
                           "properties": {
-                            "source": { "type": "string" },
-                            "actor": { "type": "string" },
-                            "reason": { "type": "string" },
-                            "confirmations": { "type": "integer", "minimum": 0 }
+                            "source": {
+                              "type": "string"
+                            },
+                            "actor": {
+                              "type": "string"
+                            },
+                            "reason": {
+                              "type": "string"
+                            },
+                            "confirmations": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
                           },
                           "required": ["source", "actor", "reason", "confirmations"],
                           "additionalProperties": false
@@ -771,11 +835,22 @@
                   "items": {
                     "type": "object",
                     "properties": {
-                      "project": { "type": "string" },
-                      "rule": { "type": "string" },
-                      "lane": { "type": "string" },
-                      "stage": { "type": "string" },
-                      "lastRun": { "type": "integer", "minimum": 1 }
+                      "project": {
+                        "type": "string"
+                      },
+                      "rule": {
+                        "type": "string"
+                      },
+                      "lane": {
+                        "type": "string"
+                      },
+                      "stage": {
+                        "type": "string"
+                      },
+                      "lastRun": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
                     },
                     "required": ["rule", "lane", "stage", "lastRun"],
                     "additionalProperties": false
@@ -786,12 +861,25 @@
                   "items": {
                     "type": "object",
                     "properties": {
-                      "run": { "type": "integer", "minimum": 1 },
-                      "project": { "type": "string" },
-                      "rule": { "type": "string" },
-                      "state": { "type": "string" },
-                      "summary": { "type": "string" },
-                      "at": { "type": ["string", "null"] }
+                      "run": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "project": {
+                        "type": "string"
+                      },
+                      "rule": {
+                        "type": "string"
+                      },
+                      "state": {
+                        "type": "string"
+                      },
+                      "summary": {
+                        "type": "string"
+                      },
+                      "at": {
+                        "type": ["string", "null"]
+                      }
                     },
                     "required": ["run", "rule", "state", "summary", "at"],
                     "additionalProperties": false
@@ -1047,14 +1135,24 @@
         "dispatch": {
           "type": "object",
           "properties": {
-            "state": { "enum": ["queued", "running", "creating", "placed", "unassigned", "replied", "failed"] },
-            "run": { "type": "integer", "minimum": 1 },
-            "project": { "type": "string", "maxLength": 100 }
+            "state": {
+              "enum": ["queued", "running", "creating", "placed", "unassigned", "replied", "failed"]
+            },
+            "run": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "project": {
+              "type": "string",
+              "maxLength": 100
+            }
           },
           "required": ["state"],
           "additionalProperties": false
         },
-        "pending": { "type": "boolean" }
+        "pending": {
+          "type": "boolean"
+        }
       },
       "required": ["event", "duplicate", "routed"],
       "additionalProperties": false
@@ -1088,8 +1186,12 @@
             "maxLength": 200
           }
         },
-        "dispatch": { "$ref": "#/$defs/eventAck/properties/dispatch" },
-        "pending": { "type": "boolean" },
+        "dispatch": {
+          "$ref": "#/$defs/eventAck/properties/dispatch"
+        },
+        "pending": {
+          "type": "boolean"
+        },
         "runs": {
           "type": "array",
           "items": {
@@ -1270,6 +1372,12 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attachment"
+          }
         }
       },
       "required": ["id", "source", "sourceName", "type", "subject", "summary", "detail", "link", "receivedAt"],
@@ -1369,6 +1477,31 @@
       },
       "required": ["card", "title", "choice", "at"],
       "additionalProperties": true
+    },
+    "attachment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^att_[0-9a-f]{16}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^/\\\\\\\\\\u0000-\\u001f\\u007f]+\\.(png|jpe?g|webp|gif)$"
+        },
+        "mediaType": {
+          "enum": ["image/png", "image/jpeg", "image/webp", "image/gif"]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 25165824
+        }
+      },
+      "required": ["id", "name", "mediaType", "size"],
+      "additionalProperties": false
     }
   }
 }

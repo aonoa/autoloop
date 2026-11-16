@@ -167,7 +167,28 @@ POST /v1/events                    Authorization: Bearer <来源的密钥>
 - 没有规则匹配的事件也留着，`agent-autoloop status` 看得到。
 - 字段上限：`id` 200 个字、`subject` 100、`summary` 200、`detail` 4000、`link` 500，`type` 64 个字符。
 
+### 附件：截图和图片原样交给 Agent
+
+任务文字有时解释不了一张报错截图。来源可以先把图片传给中台，再在事件里引用它：
+
+```
+POST /v1/attachments                Authorization: Bearer <来源的密钥>
+multipart/form-data: name=screenshot.png, file=<bytes>
+→ 200 { "id": "att_0123456789abcdef", "name": "screenshot.png", "mediaType": "image/png", "size": 18432 }
+
+POST /v1/events
+{ "id": "chat:2", "type": "qq.task", "subject": "qq-private-10001", "summary": "按钮错位",
+  "attachments": [ { "id": "att_0123456789abcdef", "name": "screenshot.png", "mediaType": "image/png", "size": 18432 } ] }
+```
+
+- 只收 PNG、JPEG、WebP、GIF，单张最多 24 MiB，一条事件最多 8 张；文件名不能带路径分隔符或控制字符。
+- 中台按文件头核对内容和 `mediaType`，事件只能引用同一来源上传、名字/类型/大小都一致且仍存在的附件。老来源和老事件不带 `attachments` 时行为不变。
+- 中台只把附件元数据和随机 `id` 记进事件；字节放在数据目录的 `attachments/`，内核不读文件。
+- 来源读回自己的原图：`GET /v1/attachments/<id>`，同样用来源密钥；别的来源看不到。`GET /v1/runs/<编号>/attachments/<id>` 用这一轮的 token，且这一轮的上下文事件必须引用该附件；轮次结束后不能再读。
+- 接单程序领到带附件的一轮后，先把图片下载到 `<run>/attachments/<name>`，再把绝对路径写进提示词。下载失败时这一轮明确失败，不会在没有截图的情况下启动 Agent。
+
 配置 `policy.dispatch` 后，没有匹配、也没有被 Policy 拒绝的**任务**外部事件会先排一轮 `kind: "dispatch"` 的只读调度轮。调度 Agent 提交 `route`，由中台重新校验项目、来源、发送人、节点和置信度后，再走与普通事件相同的派发路径；不是任务的聊天可以提交带 `"fyi": true` 的 `notice`，直接回到原会话，不启动项目轮次。未配置时行为不变：事件只记录，不自动放置。协议细节见[配置手册](configuration.md#调度-agentpolicydispatch)和[设计文档](design.md#dispatch调度-agent)。
+
 
 外部来源不必知道项目的规则、目录或节点。它只提交任务事实；需要判断项目时，事件应答带 `pending: true` 和 `dispatch`：
 
@@ -283,7 +304,8 @@ GET /v1/work?claim=<这次领活的编号>&wait=50&running=7,8&capacity=1    Aut
   "session": null,       // 尽量接着的会话：重派时是上一次的，回答来了是提问那一轮的，规则写了 resume 时是这个事项上一轮的。接不上就开新的，所以它只是优化
   "askFirst": ["删数据", "…"],
   "context": {           // 接单程序把它写成文件交给 Agent，都是资料
-    "events":  [{ "id", "source", "sourceName", "type", "subject", "summary", "detail", "link", "receivedAt" }],
+    "events":  [{ "id", "source", "sourceName", "type", "subject", "summary", "detail", "link", "receivedAt",
+                  "attachments": [{ "id", "name", "mediaType", "size" }] }],
     "answers": [{ "card", "title", "options", "choice", "chosen", "text", "about", "by", "at" }],  // 这一轮要接着做的决定；choice 是从 0 起的下标，chosen 是所选那项的文字，自由文字回答时就是那句回答
     "timers":  [{ "key", "about", "at" }],                                               // 这一轮到期的复查
     "waiting": [{ "key", "about", "at" }],                                               // 这个事项还没到期的复查
@@ -329,6 +351,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 - `resolve` 只能结同来源、同组、这一轮领活前就有的卡片，越界的写进 `rejected`，不影响这一轮的结果。
 - `later` 的 `key` 范围是这个事项，同一个 `key` 再写一次就是改时间。
 - `events` 的来源由规则的 `emits` 决定，回执改不了。
+- `context.events[].attachments` 是这一轮可读的附件元数据；接单程序据此下载本地文件。回执里的 `events` 不能新增任意附件引用，否则来源归属校验会拒绝整条事件。
 - `report` 是这一轮的结构化状态（`progress`/`waiting`/`ready`/`blocked`/`failed`/`dropped`），用来算事项阶段；`verdict` 只由研判轮填写。两者都可以不写。
 - 研判轮不做事，只读事件并交 `verdict`。`accept` 才写决定和授权并排真正的活；`stop`/`ignore`/`unavailable` 只留下决定。研判的 `reason` 与 `scope` 会写进决定；预演交付后补授权时也沿用这两项，不会退回 gate 的第一条决定。研判轮没写 `verdict`、被取消，或连续失败到不再重试，事件记为 `unavailable`，对应规则记为 `refused`，不会永远挂着；同一条事件和规则只留一条 `unavailable`。规则在研判排队时被删掉，也按这一条结算。
 

@@ -1,4 +1,5 @@
 import type { Rule } from "../kernel/rules.ts";
+import type { EventAttachment } from "./validate.ts";
 export type Job = {
   run: number;
   token: string;
@@ -50,6 +51,8 @@ export type Job = {
       link: string;
       receivedAt: string;
       hops?: number;
+      /** Files the source uploaded for this event; the worker downloads them before starting the Agent. */
+      attachments?: EventAttachment[];
     }[];
     answers: {
       card: number;

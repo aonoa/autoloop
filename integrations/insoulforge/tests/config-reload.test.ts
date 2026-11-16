@@ -12,6 +12,7 @@ const config = parseConfig({
 });
 const hub = {
   submit: async () => ({}),
+  upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
   outcome: async () => ({ runs: [] }),
   state: async () => ({ cards: [], runs: [] }),
   answer: async () => ({}),

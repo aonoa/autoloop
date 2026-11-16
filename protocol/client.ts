@@ -40,6 +40,22 @@ export function hubClient(url: string, key: string) {
     progress: (run: number, token: string, body: { step: string; detail?: string; kind?: string; at?: string }) =>
       call("POST", `/v1/runs/${run}/progress`, { token, body }),
     result: (run: number, token: string, body: unknown) => call("POST", `/v1/runs/${run}/result`, { token, body }),
+    /** Download one attachment for a claimed run. The run token proves which round may read it. */
+    async attachment(run: number, token: string, id: string) {
+      const response = await fetch(`${base}/v1/runs/${run}/attachments/${encodeURIComponent(id)}`, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        let message = `中台返回 ${response.status}`;
+        try {
+          const data = await response.json();
+          if (data?.error) message = data.error;
+        } catch {}
+        throw new HubError(response.status, message);
+      }
+      return response;
+    },
     // The channel's door.
     nextCard: (wait: number) => call("GET", `/v1/cards/next?wait=${wait}`, { timeout: wait + 30 }),
     delivered: (card: number, version: number, ref: string | null) =>

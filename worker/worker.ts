@@ -79,7 +79,7 @@ type Entry = {
   /** Steps already sent, so a re-read of the same output doesn't send them again. */
   progressSent?: string[];
 };
-export type WorkerHub = Pick<Hub, "work" | "started" | "progress" | "result">;
+export type WorkerHub = Pick<Hub, "work" | "started" | "progress" | "result" | "attachment">;
 export type WorkerOptions = {
   hub: WorkerHub;
   name: string;
@@ -326,8 +326,31 @@ export function createWorker({
     save(entry);
   }
 
+  /** Local files for this run. Names come from the source, so only their basename is used and collisions are numbered. */
+  async function attachments(entry: Entry, job: Job) {
+    const files: { name: string; path: string }[] = [];
+    const folder = path.join(entry.dir, "attachments");
+    for (const [index, attachment] of job.context.events.flatMap((event) => event.attachments ?? []).entries()) {
+      const name = path.basename(attachment.name);
+      if (!name || name !== attachment.name || name === "." || name === "..") {
+        throw new Error(`附件 ${index + 1} 的文件名不安全`);
+      }
+      mkdirSync(folder, { recursive: true, mode: 0o700 });
+      const target = path.join(folder, name);
+      if (existsSync(target)) throw new Error(`附件 ${name} 重名，无法落地`);
+      const response = await hub.attachment(job.run, job.token, attachment.id);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length !== attachment.size) throw new Error(`附件 ${name} 下载不完整`);
+      writeFileSync(target, bytes, { mode: 0o600 });
+      files.push({ name, path: target });
+    }
+    return files;
+  }
+
   async function start(job: Job) {
     const dir = path.join(RUNS, `${job.run}-${job.attempt}`);
+    // A worker stopped after saving the job but before launching it must not start a second Agent on the next tick.
+    if (existsSync(path.join(dir, "entry.json"))) return;
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const entry: Entry = {
       run: job.run,
@@ -346,8 +369,9 @@ export function createWorker({
     save(entry);
     try {
       writeFileSync(path.join(dir, "context.json"), JSON.stringify(job.context, null, 2), { mode: 0o600 });
+      const files = await attachments(entry, job);
       const adapter = await adapterFor(job.agent.use);
-      entry.prompt = promptFor(job, path.join(dir, "context.json"));
+      entry.prompt = promptFor(job, path.join(dir, "context.json"), files);
       save(entry);
       launch(entry, adapter, entry.prompt);
     } catch (error) {

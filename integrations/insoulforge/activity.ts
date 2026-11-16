@@ -22,12 +22,22 @@ export type Config = {
   projects: Record<string, Project>;
 };
 
+type Attachment = {
+  image_id: string;
+  message_id?: string;
+  image_index?: number;
+  description?: string;
+  ticket: string;
+};
+type EventAttachment = { id: string; name: string; mediaType: string; size: number };
 type Incoming = { type?: string };
 type Request = { type?: string; parameters?: unknown; context?: unknown };
 type Outgoing = Record<string, unknown> & { type: string };
 
 export type Hub = {
   submit(event: Record<string, unknown>): Promise<unknown>;
+  /** Upload already-downloaded image bytes and get the hub reference an event may carry. */
+  upload(name: string, mediaType: string, bytes: Uint8Array): Promise<EventAttachment>;
   /** What the hub recorded for an event just submitted: its run, if a rule took it. */
   outcome(event: number): Promise<any>;
   state(): Promise<any>;
@@ -65,6 +75,7 @@ submit：提交一个新任务。
   - project_hint：可选的项目短名，只能是下列之一（不是文件路径）；拿不准时不要填，Autoloop 的调度 Agent 会判断：
 ${projects}${general}
   - text：任务原话，最多 4000 字。
+  - 用户在本轮发来的截图或图片会由主程序放进可信 context.attachments，并由本服务自动转交；你不能在 parameters 里写图片 ID 或票据，也不用把图片描述当成原图。
   - target_session：从本轮 current_session 复制，规则见下节；服务会与应用注入的当前会话核对。
   - 成功返回 run/target_session/routed，以及可直接发给用户的 ack 文案；没有 hint 时 project 可能为空，表示正在判断项目。
   - 提交成功后，必须先把 ack 或等价的一句话发给用户；没有 hint 时说明“已提交，正在判断属于哪个项目”，不要说“没有规则接单”。
@@ -250,6 +261,7 @@ export function eventOf(
   text: string,
   actor: string,
   id: string = randomUUID(),
+  attachments?: EventAttachment[],
 ) {
   const detail = text.slice(0, MAX_TEXT);
   if (!detail.trim()) throw new Error("任务不能为空");
@@ -262,6 +274,7 @@ export function eventOf(
     detail,
     actor,
     reply: replyOf(target),
+    ...(attachments?.length && { attachments }),
   };
 }
 
@@ -357,6 +370,60 @@ export function statusOf(state: any, config: Config, target?: string, project?: 
 
 export type Service = ReturnType<typeof createService>;
 
+/** The Activity's HTTP base, derived from the same host as its WebSocket endpoint. */
+function activityHttpBase(config: Config) {
+  const url = new URL(config.activity.url);
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  url.pathname = "";
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/$/, "");
+}
+
+/** Download the exact screenshots the main program signed for this request, never an image id from model text. */
+async function downloadAttachments(config: Config, hub: Hub, context: unknown, log: (line: string) => void) {
+  const raw =
+    context && typeof context === "object" && !Array.isArray(context) ? (context as any).attachments : undefined;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 8) throw new Error("本轮图片附件格式不正确或超过 8 张");
+  const uploaded: EventAttachment[] = [];
+  for (const [index, item] of raw.entries()) {
+    if (!item || typeof item !== "object" || typeof item.image_id !== "string" || typeof item.ticket !== "string") {
+      throw new Error(`第 ${index + 1} 张图片缺少签名票据`);
+    }
+    if (!/^img_[0-9a-f]{8}$|^[0-9a-f]{64}$/.test(item.image_id)) throw new Error("图片编号格式不正确");
+    const url = new URL(`${activityHttpBase(config)}/activities/attachments/${encodeURIComponent(item.image_id)}`);
+    url.searchParams.set("name", config.activity.name ?? "autoloop");
+    url.searchParams.set("ticket", item.ticket);
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${config.activity.token}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const body: any = await response.json();
+        if (body?.error) detail = body.error;
+      } catch {}
+      throw new Error(`第 ${index + 1} 张图片取不回来：${detail}`);
+    }
+    const mediaType = (response.headers.get("content-type") ?? "").split(";")[0].trim();
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(mediaType)) throw new Error("主程序返回的不是支持的图片类型");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.length || bytes.length > 24 * 1024 * 1024) throw new Error("图片为空或超过 24 MiB");
+    const extension = mediaType === "image/jpeg" ? "jpg" : mediaType.slice(6);
+    const ordinal = typeof item.image_index === "number" ? item.image_index : index;
+    const name = `screenshot-${index + 1}-${ordinal}.${extension}`;
+    try {
+      uploaded.push(await hub.upload(name, mediaType, bytes));
+    } catch (error) {
+      log(`图片 ${item.image_id} 上传中台失败：${error}`);
+      throw new Error(`第 ${index + 1} 张图片没有交到中台：${(error as Error).message}`);
+    }
+  }
+  return uploaded;
+}
+
 /** The request handling, separated from the socket so tests can run it without a real InSoulForge. */
 export function createService(config: Config, hub: Hub, log = (_line: string) => {}) {
   let current = config;
@@ -397,7 +464,13 @@ export function createService(config: Config, hub: Hub, log = (_line: string) =>
         return fail(String((error as Error).message));
       }
       if (!permittedSender(sender, target, current)) return fail("这个发送人没有派任务权限");
-      const event = eventOf(target, project, input.text, sender);
+      let attachments: EventAttachment[] = [];
+      try {
+        attachments = await downloadAttachments(current, hub, context, log);
+      } catch (error) {
+        return fail(`截图附件没有交上：${(error as Error).message}`);
+      }
+      const event = eventOf(target, project, input.text, sender, undefined, attachments);
       try {
         const ack: any = await hub.submit(event as unknown as Record<string, unknown>);
         const routed: string[] = Array.isArray(ack?.routed) ? ack.routed : [];
@@ -557,8 +630,27 @@ export function hubClient(config: Config): Hub {
     if (!response.ok) throw new Error(`中台返回 ${response.status}${data?.error ? `：${data.error}` : ""}`);
     return data;
   }
+  async function upload(name: string, mediaType: string, bytes: Uint8Array) {
+    const form = new FormData();
+    form.set("name", name);
+    form.set("file", new Blob([Buffer.from(bytes)], { type: mediaType }), name);
+    const response = await fetch(`${config.hub.url}/v1/attachments`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.hub.sourceKey}` },
+      body: form,
+      signal: AbortSignal.timeout(30_000),
+    });
+    const text = await response.text();
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {}
+    if (!response.ok) throw new Error(`中台返回 ${response.status}${data?.error ? `：${data.error}` : ""}`);
+    return data as EventAttachment;
+  }
   return {
     submit: (event) => call("/v1/events", config.hub.sourceKey, event),
+    upload,
     outcome: (event) => call(`/v1/events/${event}`, config.hub.sourceKey),
     state: () => call("/v1/state", config.hub.ownerKey),
     answer: (card, body) => call(`/v1/cards/${card}/answer`, config.hub.ownerKey, body),

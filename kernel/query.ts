@@ -250,10 +250,24 @@ export function jobOf(view: View, run: Row, env: Environment, now = Date.parse(r
     askFirst: rules.askFirst,
     ...(runThread && { thread: runThread }),
     context: {
-      events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
-        const sourceName = rules.sources[source]?.name ?? source;
-        return { id, source, sourceName, type, subject, summary, detail, link, receivedAt, hops: hops ?? 0 };
-      }),
+      events: events.map(
+        ({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops, attachments }) => {
+          const sourceName = rules.sources[source]?.name ?? source;
+          return {
+            id,
+            source,
+            sourceName,
+            type,
+            subject,
+            summary,
+            detail,
+            link,
+            receivedAt,
+            hops: hops ?? 0,
+            ...(attachments && { attachments }),
+          };
+        },
+      ),
       answers: answers.map(({ id: card, title, options, choice, answer: text, about, by, decided_at: at }) => {
         const picked: string[] = JSON.parse(options);
         return {

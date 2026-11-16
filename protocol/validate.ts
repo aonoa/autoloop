@@ -119,10 +119,51 @@ export type EventInput = {
   /** Where a reply belongs when the source names a conversation: `qq-private-<number>` or `qq-group-<number>`, never
    * free text. */
   reply?: string;
+  /** Files the source uploaded first, referenced by their hub-issued ids. Bytes never travel inside the event. */
+  attachments?: EventAttachment[];
 };
 
+/** A file a source uploaded through `/v1/attachments`; `name` is display metadata, never a path. */
+export type EventAttachment = { id: string; name: string; mediaType: string; size: number };
+export const ATTACHMENT_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
+export const MAX_ATTACHMENTS = 8;
+export const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
+const ATTACHMENT_ID = /^att_[0-9a-f]{16}$/;
+const ATTACHMENT_NAME = /^[^/\\\x00-\x1f\x7f]{1,200}$/;
+const ATTACHMENT_EXTENSION = /\.(png|jpe?g|webp|gif)$/i;
+
+function parseAttachment(input: unknown): EventAttachment {
+  if (typeof input !== "object" || input === null || Array.isArray(input))
+    throw new InputError("附件要是一个 JSON 对象");
+  const given = input as Record<string, unknown>;
+  for (const name of Object.keys(given)) {
+    if (!["id", "name", "mediaType", "size"].includes(name)) throw new InputError(`不认识的附件字段：${name}`);
+  }
+  const id = given.id;
+  const name = given.name;
+  const mediaType = given.mediaType;
+  const size = given.size;
+  if (typeof id !== "string" || !ATTACHMENT_ID.test(id)) throw new InputError("附件 id 不是中台签发的编号");
+  if (typeof name !== "string" || !ATTACHMENT_NAME.test(name) || !ATTACHMENT_EXTENSION.test(name)) {
+    throw new InputError("附件 name 要是安全的图片文件名");
+  }
+  if (typeof mediaType !== "string" || !(ATTACHMENT_TYPES as readonly string[]).includes(mediaType)) {
+    throw new InputError("附件 mediaType 只能是 PNG、JPEG、WebP 或 GIF");
+  }
+  if (!Number.isSafeInteger(size) || (size as number) < 1 || (size as number) > MAX_ATTACHMENT_BYTES) {
+    throw new InputError(`附件 size 要在 1 到 ${MAX_ATTACHMENT_BYTES} 字节之间`);
+  }
+  return { id, name, mediaType, size: size as number };
+}
+
+function parseAttachments(input: unknown): EventAttachment[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input) || input.length > MAX_ATTACHMENTS) throw new InputError(`附件最多 ${MAX_ATTACHMENTS} 项`);
+  return input.map(parseAttachment);
+}
+
 const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500, actor: 200, reply: 100 } as const;
-const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor", "reply"];
+const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor", "reply", "attachments"];
 
 export function parseEvent(input: unknown): EventInput {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -149,6 +190,7 @@ export function parseEvent(input: unknown): EventInput {
     hops: hops as number,
     actor: field("actor"),
     ...(given.reply !== undefined && { reply: field("reply") }),
+    ...(given.attachments !== undefined && { attachments: parseAttachments(given.attachments) }),
   };
   // Half a Unicode character is stored and looked up as different bytes, so the same id would never be recognised again.
   if (!event.id.isWellFormed()) throw new InputError("id 里有不完整的字符");

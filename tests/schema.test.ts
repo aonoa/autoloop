@@ -74,6 +74,35 @@ test("wire schemas agree with event and receipt boundaries", () => {
   }
 });
 
+test("events carry bounded attachment references without trusting names or bytes", () => {
+  const attachment = {
+    id: "att_0123456789abcdef",
+    name: "screenshot.png",
+    mediaType: "image/png",
+    size: 1024,
+  };
+  const event = { id: "shot", type: "qq.task", attachments: [attachment] };
+  assert.deepEqual(parseEvent(event).attachments, [attachment]);
+  assert.deepEqual(checkSchema("event", event), []);
+  for (const bad of [
+    { ...attachment, id: "../etc/passwd" },
+    { ...attachment, id: "att_" },
+    { ...attachment, name: "../screenshot.png" },
+    { ...attachment, name: "shot.exe" },
+    { ...attachment, mediaType: "text/html" },
+    { ...attachment, size: 0 },
+    { ...attachment, size: 24 * 1024 * 1024 + 1 },
+    { ...attachment, unknown: true },
+  ]) {
+    const input = { ...event, attachments: [bad] };
+    assert.throws(() => parseEvent(input));
+    assert.ok(checkSchema("event", input).length, JSON.stringify(bad));
+  }
+  const tooMany = { ...event, attachments: Array(9).fill(attachment) };
+  assert.throws(() => parseEvent(tooMany));
+  assert.ok(checkSchema("event", tooMany).length);
+});
+
 test("schema checks reject inherited names and incomplete tasks or question cards", () => {
   assert.ok(checkSchema("event", { id: "x", type: "one", constructor: "unexpected" }).length);
   assert.ok(checkSchema("job", { run: 1, token: "t", rule: {}, agent: {}, context: {} }).length);
