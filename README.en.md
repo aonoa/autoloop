@@ -67,7 +67,7 @@ The numbers match the diagram above:
 
 1. **An event comes in.** A 9:00 AM schedule, a new GitHub issue, or a production alert becomes a standard event sent to the kernel.
 2. **Dispatched by your rules.** Your rules decide which agent handles it and in which folder. New events for the same subject while it is queued merge into one round.
-3. **Work one round and exit.** The agent puts its result in its final message, and the process exits.
+3. **Work one round and exit.** The agent puts its result in its final message, and the process exits. While it runs it streams what it is doing; `agent-autoloop status` (the "doing now" line) and `agent-autoloop why <run>` both show those steps.
 4. **Asks only when needed.** For sensitive actions like deleting data, restarting a service, spending money, or messaging people, the kernel sends you a card through Feishu or a desktop notification. While you take your time, no agent process runs and no tokens are spent.
 5. **One tap resumes it.** Your answer picks up the original conversation and finishes the job.
 
@@ -126,6 +126,14 @@ Order checked. We have enough stock in the warehouse.
 ````
 
 Besides `ask`, receipts can send notifications (`notice`), resolve open cards (`resolve`), schedule follow-up checks (`later`), and emit new events (`events`). A notice asks for nothing, but you can add a line of your own when you settle one, and it stays on the card; one marked `fyi` is only there to tell you, and has no button. If the JSON is invalid, the hub has the agent rewrite just that final message in the same session, without repeating completed work. If rewriting also fails, it keeps the original conclusion and tells you the receipt was not applied (a plain command has no session, so it goes straight to this). Going on in an old session works the same way: a new session starts only when the old one can't be continued. If it was continued and then broke partway, the run counts as failed and is retried in that session a few minutes later, not redone in a new one. A new event on the same thread starts a new session by default; with `"resume": true` in the rule it goes on in the last round's session.
+
+### Projects and the dispatch agent
+
+A hub or a group can run several unrelated **projects** at once, each with its own session and history. In a group, start a message with `/project-short-name` (for example `/shop list this`); that part splits into the project's own lane, so `/shop` and `/site` keep separate histories, while messages without a prefix stay on the shared group lane. The short name only identifies the subject — which folder and permissions an agent gets still come from your rules.
+
+`agent-autoloop project add <name> --description "one line" [--worker <node>] [--cwd <dir>] [--agent <agent>] [--rule <rule>]` writes both `rules.json` and the InSoulForge Activity config in one step; `agent-autoloop project list` shows them and `agent-autoloop project remove <name>` deletes one. The `--description` is the project note the dispatch agent reads.
+
+When an event matches no rule and no alias, you can turn on the optional **dispatch agent** (`policy.dispatch`, off by default). It is a read-only control plane: from project notes, aliases, node liveness, recent sessions, and your own corrections it decides which project an event belongs to and returns only a `route` (project, a `continue`/`new`/`ask` session, a confidence, and a reason); the hub re-checks project, source, sender, node, and confidence before it actually dispatches. Chat that is not a task can come back with `fyi` to answer in place; anything it cannot place becomes an "unassigned" card. External systems therefore never need to know rules, folders, or nodes. With `create` on it can only *propose* a new project, which the hub validates into a pending item for the host to write. See [dispatch agent configuration](docs/configuration.md#调度-agentpolicydispatch).
 
 ## Ready-to-use recipes
 
@@ -256,6 +264,7 @@ For automated workloads, providers generally recommend using API keys rather tha
 | `worker/`                                                | Claim work, run agents, handle heartbeats and cancellation, read and submit receipts                                   |
 | `cli/`, `bin/`                                           | User commands and entry point: status, answers, `why`, MCP, updates, and uninstall                                     |
 | `plugins/`                                               | Built-in agent, event, channel, and delivery plugins                                                                   |
+| `integrations/`                                          | External product glue: the InSoulForge QQ-bot Activity (event intake, the reply-back channel, and its tests)           |
 | `examples/recipes/`                                      | Complete recipes with rules, a task Skill, and setup instructions                                                      |
 | `examples/plugins/`, `examples/skills/`, `examples/*.sh` | Minimal plugin templates, standalone task guides, and Shell examples                                                   |
 | `skills/agent-autoloop/`                                 | The hub's configuration and operation manual, also made available to agents during installation                        |
