@@ -10,7 +10,7 @@
 | `cli/main.ts`                                        | 命令解析与用户操作                       |
 | `cli/status.ts`、`cli/runs.ts`、`cli/why.ts`         | 状态、轮次和历史展示                     |
 | `cli/mcp.ts`                                         | stdio MCP 服务                           |
-| `cli/backup.ts`、`cli/update.ts`、`cli/uninstall.ts` | 备份恢复、更新、卸载                     |
+| `cli/backup.ts`、`cli/compact.ts`、`cli/update.ts`、`cli/uninstall.ts` | 备份恢复、日志压缩、更新、卸载 |
 | `host/up.ts`                                         | 单进程启动中台、worker 和通道            |
 | `host/runtime.ts`                                    | 打开数据库、加载规则、执行决策、状态查询 |
 | `host/server.ts`                                     | 时钟、规则文件监听、长轮询唤醒、日志流   |

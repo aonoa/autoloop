@@ -102,6 +102,8 @@ Agent 结束了这一轮，问了你一个问题。它现在不占进程、不�
 
 `agent-autoloop pause <规则>`、`resume <规则>` 暂停和恢复一条规则，暂停期间到点不跑、来事件不接也不排队，恢复后不自动补跑；恢复时会列出暂停期间跳过的事件，照着给出的 `agent-autoloop replay <规则> --since <时间>` 一次补跑，每条只补一次。`agent-autoloop run <规则>` 立即跑一轮。这些记在中台的日志里，不改 `rules.json`。`agent-autoloop runs [规则]` 列出做完的轮次，`--before <第几轮>` 往前翻，拿到编号再用 `agent-autoloop why <第几轮>` 看来龙去脉。
 
+平时不用管磁盘：日志会一直增长，但其中最大的一块是心跳和通道轮询。停掉中台后运行 `agent-autoloop compact` 可以把保留期外的那部分清掉，状态不变；默认保留最近 14 天，`--keep-days` 可改，细节见[压缩日志](docs/operations.md#压缩日志)。
+
 保存后几秒内自动生效，可以运行 `agent-autoloop check` 检查，`agent-autoloop check <文件>` 检查一份草稿，不碰正在跑的中台；`agent-autoloop rules explain [文件]` 看生效的规则和下次定时（也可以指定一份草稿），`agent-autoloop emit <类型> --dry-run` 预演一条事件会派给谁（不连接中台、不写日志）。就算改错了，或者文件被删、读不到，系统也会继续按旧规则跑，并发卡片提醒你。
 
 ### Agent 怎么跟中台配合？

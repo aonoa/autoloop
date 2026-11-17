@@ -123,6 +123,7 @@ const EVERY_OTHER_COMMAND = [
   "backup",
   "board",
   "check",
+  "compact",
   "conformance",
   "decisions",
   "doctor",

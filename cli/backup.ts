@@ -61,7 +61,7 @@ function readableBackup(source: string) {
 }
 
 /** Whether anything has the database open, a hub between requests included: only then is this lock out of reach. */
-function inUse(database: string) {
+export function inUse(database: string) {
   if (!existsSync(database)) return false;
   const db = new DatabaseSync(database);
   try {

@@ -153,6 +153,36 @@ agent-autoloop restore ~/backups/autoloop-2026-11-13
 agent-autoloop service install
 ```
 
+## 压缩日志
+
+日志只追加：每次心跳、每个通道轮询都会留下一条事实。它们量最大、内容最少——每条只是把某个键的最新时间戳覆盖一遍——却和业务事实一样永久留在库里。长期运行的中台，绝大部分日志都是这类“还在”。
+
+```bash
+agent-autoloop service remove     # 压缩要独占数据库，先停中台
+agent-autoloop compact            # 保留最近 14 天的心跳和轮询
+agent-autoloop service install    # 再装回来
+```
+
+`compact` 会：
+
+- 删掉保留期外的 `heartbeat` 和 `channelSeen`，但每个键的最新一条一定留着；
+- 删掉某一行之外还会删掉行的那些事实（只留真正的覆盖）；
+- 用剩下的日志重建投影，和压缩前的状态逐行比对，不一样就整个回滚；
+- 清掉指向已删事实的 `projection_refs`，`why` 不会读到空；
+- `VACUUM` 把空间还给文件系统；
+- 保留 `keys`、`config`、`decisions` 等由本人决定的行，不碰。
+
+```bash
+agent-autoloop compact --keep-days 30   # 留长一点
+agent-autoloop compact --yes            # 非交互终端里跳过确认
+```
+
+状态不会变，业务记录（事件、轮次、卡片、回答、回执）一条不动；变化的只是 `why <老轮次>` 的时间线里少掉“某分钟又报了一次”这类行。中台必须在停止状态：`compact` 要独占数据库，VACUUM 也需要。
+
+不压缩也能一直跑，代价是状态汇总变慢（见[历史增长实测](protocol.md#历史增长实测)）。按每天约 0.65 MB 的心跳和轮询算，两年大约 470 MB，那时压缩一次即可。
+
+工作机上的 `worker/runs/` 不用管：超过 14 天的轮次输出由接单程序自己清理。
+
 ## 升级
 
 ```bash
@@ -337,6 +367,7 @@ worker 失联或进程无法核实。检查：
 实测数据见 [README](../README.md#实测性能) 和 [protocol.md](protocol.md#历史增长实测)。运维要点：
 
 - 单机 SQLite，写入逐条提交；
+- 日志只追加，心跳和通道轮询是其中量最大的部分；停中台后用 `agent-autoloop compact` 清掉保留期外的那部分；
 - 历史增长后状态汇总变慢；
 - 格式变化后首次启动需要全量重建投影；
 - 长轮询连接占用内存，1000 个并发连接约 170 MB RSS；

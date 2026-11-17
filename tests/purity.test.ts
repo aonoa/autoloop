@@ -72,6 +72,11 @@ test("time and entropy enter through the shell", () => {
 });
 
 test("only evolve writes projections and only commit appends the log", () => {
+  // One command may take facts out, and only that one: `compact` is run against a stopped hub with the log to itself,
+  // and it rebuilds from what is left and compares that with what was there, so a wrong trim is a rollback rather than a
+  // changed state. Nothing the running hub does may delete a fact, and nothing else may be added here without the same.
+  const LIFTS = new Set(["cli/compact.ts"]);
+
   const production = ["kernel", "host", "protocol", "plugins", "worker", "cli"]
     .filter((name) => existsSync(join(root, name)))
     .flatMap((name) =>
@@ -84,7 +89,7 @@ test("only evolve writes projections and only commit appends the log", () => {
     const text = readFileSync(join(root, file), "utf8");
     if (file !== "kernel/evolve.ts") assert.ok(!/\b(INSERT INTO|UPDATE|DELETE FROM) projections/.test(text), file);
     if (file !== "kernel/store.ts") assert.ok(!/\bINSERT INTO facts/.test(text), file);
-    assert.ok(!/\b(UPDATE|DELETE FROM) facts/.test(text), file);
+    if (!LIFTS.has(file)) assert.ok(!/\b(UPDATE|DELETE FROM) facts/.test(text), file);
   }
   const store = readFileSync(join(root, "kernel/store.ts"), "utf8");
   assert.ok(!/INSERT INTO facts/.test(store.slice(0, store.indexOf("export function commit("))));

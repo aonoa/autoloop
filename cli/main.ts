@@ -77,6 +77,8 @@ const HELP = `Agent 自动化中台
                                     另一台电脑只接活时用
   agent-autoloop backup [目录]           备份数据库、主密钥、配置、规则和 secrets.env；不填目录就放在 ~/.agent-autoloop/backups
   agent-autoloop restore <目录> [--yes]  停掉中台后，用一次备份恢复本机数据
+  agent-autoloop compact [--keep-days 天] [--yes]
+                                    停掉中台后，清掉日志里的心跳和轮询，状态不变
   agent-autoloop update                  更新到最新发布的版本
   agent-autoloop uninstall [--yes]       卸载程序并保留数据；--yes 跳过确认
   agent-autoloop --version               版本和当前提交
@@ -122,6 +124,12 @@ const UNINSTALL_USAGE = `用法：agent-autoloop uninstall [--yes]
 const RESTORE_USAGE = `用法：agent-autoloop restore <目录> [--yes]
 
 恢复会替换本机的数据库、主密钥、配置、规则和 secrets.env；先停掉中台，--yes 跳过确认。`;
+
+const COMPACT_USAGE = `用法：agent-autoloop compact [--keep-days <天>] [--yes]
+
+清掉日志里“还在”的心跳和通道轮询，状态不变，文件变小。要先停中台。
+  --keep-days  留最近几天的心跳，默认 14；每个键的最新一条总是留着
+  --yes        跳过确认`;
 
 /** What each command reads besides its own words, and how to use it. */
 const TAKES: Record<string, { flags: string[]; usage: string }> = {
@@ -184,6 +192,7 @@ rules.json 里这个定时任务要写 cwd；你答了，中台叫醒它的 Agen
   // Only its first word is read as anything: the rest is a result in someone's own words, dashes and all.
   resolve: { flags: [], usage: "用法：agent-autoloop resolve <卡片> <结果>" },
   restore: { flags: ["yes"], usage: RESTORE_USAGE },
+  compact: { flags: ["keep-days", "yes"], usage: COMPACT_USAGE },
   resume: { flags: [], usage: "用法：agent-autoloop resume <规则>" },
   replay: {
     flags: ["since"],
@@ -871,6 +880,29 @@ async function restoreCommand(args: string[]) {
   console.log(`恢复好了。原来的文件在 ${safety}。\n启动：agent-autoloop up 或 agent-autoloop service install`);
 }
 
+async function compactCommand(args: string[]) {
+  const { named } = flags(args);
+  const keepDays = named["keep-days"] === undefined ? undefined : Number(named["keep-days"]);
+  if (keepDays !== undefined && !Number.isInteger(keepDays)) return fail(COMPACT_USAGE);
+  if (named.yes === undefined) {
+    if (!process.stdin.isTTY) return fail("压缩要先停掉中台；确认后运行 agent-autoloop compact --yes");
+    const answer = await askAtTerminal("压缩要先停掉中台。已经停了，继续？[y/N] ");
+    if (!/^y(es)?$/i.test(answer.trim())) {
+      console.log("没有压缩。");
+      return;
+    }
+  }
+  const { compact, KEEP_DAYS } = await import("./compact.ts");
+  const done = compact(HOME, { keepDays: keepDays ?? KEEP_DAYS });
+  const mb = (bytes: number) => `${(bytes / 1e6).toFixed(1)} MB`;
+  if (!done.dropped) return console.log(`没有可清的：${done.left} 条记录都还在保留期内，${mb(done.after)}。`);
+  console.log(
+    `清掉 ${done.dropped} 条心跳和轮询，还剩 ${done.left} 条；${mb(done.before)} → ${mb(done.after)}。` +
+      (done.vacuumed ? "" : "\n回收空间没成功，记录已经整理过了。") +
+      "\n启动：agent-autoloop service install 或 agent-autoloop up",
+  );
+}
+
 async function rulesCommand(args: string[]) {
   const { rest } = flags(args);
   if (rest[0] !== "explain" || rest.length > 2) return fail(TAKES.rules.usage);
@@ -1059,6 +1091,7 @@ const commands: Record<string, () => unknown> = {
   stop: () => stop(args),
   backup: () => backupCommand(args),
   restore: () => restoreCommand(args),
+  compact: () => compactCommand(args),
   update,
   uninstall: async () => {
     const { uninstall } = await import("./uninstall.ts");
