@@ -233,6 +233,8 @@ export function promptFor(job: Job, contextFile: string, attachments: { name: st
     "- 可以自动重试的临时失败：写“没跑成：”加一句大白话原因，过几分钟会重派。要人决定或恢复的事不写“没跑成”。",
     "- 看过了，没有要做的：写“没事可做：”加一句原因。",
     "- 其余：一句话说做成了什么。",
+    "第一行下面接着写正文：要人看的实际结果、清单、来源和验证情况。第一行只是标题，别把正文压进那一行；" +
+      "正文会随结论一起发给人，写长了通道会分几条发完，不会被截掉。",
     "",
     "需要中台做事时，在最后一条消息的末尾附一个回执：" +
       "一个标记为 agent-autoloop 的代码块，里面是 JSON，用不到的字段不写；什么都不需要就不附。",
@@ -259,6 +261,7 @@ export const repairPrompt = (problem: string) =>
 type Message = {
   outcome: "done" | "nothing" | "failed";
   summary?: string;
+  detail?: string;
   error?: string;
   receipt?: Record<string, unknown>;
   problem?: string;
@@ -275,7 +278,8 @@ function fit(text: string, limit: number) {
 export function readMessage(said: string): Message {
   const blocks = [...said.matchAll(BLOCK)];
   const lines = said.replace(BLOCK, "").split("\n");
-  const firstLine = lines.map((line) => line.trim()).find(Boolean) ?? "";
+  const firstIndex = lines.findIndex((line) => line.trim() !== "");
+  const firstLine = firstIndex === -1 ? "" : lines[firstIndex].trim();
   const first = firstLine
     .replace(/^[#>*\s]+/, "")
     .replace(/\*\*/g, "")
@@ -284,7 +288,16 @@ export function readMessage(said: string): Message {
   const rest = (word: string) => first.slice(word.length).replace(/^[\s:：]+/, "");
   const failed = FAILED.find((word) => first.startsWith(word));
   const nothing = NOTHING.find((word) => first.startsWith(word));
-  let message: Message = { outcome: "done", summary: first };
+  // The lines under the conclusion are the answer itself; keeping only the first line left people with a headline and no report.
+  const body =
+    firstIndex === -1
+      ? ""
+      : lines
+          .slice(firstIndex + 1)
+          .join("\n")
+          .trim();
+  const detail = body ? body.replace(/\n{3,}/g, "\n\n") : undefined;
+  let message: Message = { outcome: "done", summary: first, ...(detail && { detail }) };
   if (failed) message = { outcome: "failed", error: rest(failed) || "没说原因" };
   else if (nothing) message = { outcome: "nothing", summary: rest(nothing) };
   const block = blocks.at(-1)?.[1];
@@ -333,6 +346,7 @@ export function resultFrom(
   const base: Result = {
     outcome: message.outcome,
     ...(message.summary !== undefined && { summary: fit(message.summary, 500) }),
+    ...(message.detail !== undefined && { detail: fit(message.detail, 8000) }),
     ...(message.error !== undefined && { error: fit(message.error, 500) }),
     ...(extra.session && { session: extra.session }),
     ...(extra.usage && { usage: extra.usage }),

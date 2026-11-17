@@ -14,7 +14,7 @@ const VIEWS = {
     "id source key type subject summary detail link actor reply matched routed dispatched paused refused dispatch_run dispatch_state dispatch_project received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
-    "claimed_at seen_at finished_at manual summary error usage report",
+    "claimed_at seen_at finished_at manual summary detail error usage report",
   run_events: "run_id event_id context",
   run_progress: "id run_id at step detail kind",
   cards:
@@ -241,6 +241,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       finishedAt: run.finished_at,
       notBefore: run.not_before,
       summary: run.summary ?? "",
+      detail: run.detail ?? "",
       error: run.error ?? "",
       link: run.link ?? "",
       session: run.session,

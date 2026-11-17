@@ -14,6 +14,8 @@ import insoulforge, {
   modeOf,
   mustRelay,
   notificationOf,
+  notificationsOf,
+  parts,
   shouldSend,
   targetOf,
   words,
@@ -301,4 +303,32 @@ test("insoulforge: idle outbox connections keep sending status heartbeats", asyn
   assert.equal(status[0].active, false);
   server.closeAllConnections();
   server.close();
+});
+
+test("insoulforge: a long report is sent in parts instead of being cut off at the chat app's limit", () => {
+  const items = Array.from(
+    { length: 90 },
+    (_, index) => `**${index + 1}. 项目** — 节点 vantablack，目录 /root/work/p${index + 1}，状态在线，仅只读核对。`,
+  );
+  const card = { ...base, state: "done" as const, title: "QQ 通用任务", text: items.join("\n\n") };
+  const notices = notificationsOf(card, "private:10001001");
+  assert.ok(notices.length > 1, "a report longer than one message is split, not clipped");
+  const said = notices.map((notice) => notice.text);
+  const whole = said.join("\n");
+  for (const item of items) assert.equal(whole.split(item).length - 1, 1, `每一项都要原样出现一次：${item}`);
+  for (const [index, text] of said.entries()) {
+    assert.ok(text.length < 4000, "each part fits a chat message");
+    assert.match(text, new RegExp(`第 ${index + 1}/${notices.length} 段`));
+    assert.match(text, /\[系统通知\] 会话：private:10001001/);
+    assert.match(text, /必须转告用户/);
+  }
+  assert.ok(said.join("").includes(items.at(-1)!), "the last item still reaches the person");
+});
+
+test("insoulforge: splitting keeps whole lines, and only breaks a single overly long line", () => {
+  assert.deepEqual(parts("短消息"), ["短消息"]);
+  const long = "一".repeat(25);
+  assert.deepEqual(parts(long, 10), ["一".repeat(10), "一".repeat(10), "一".repeat(5)]);
+  const lines = ["a".repeat(6), "b".repeat(6), "c".repeat(6)].join("\n");
+  assert.deepEqual(parts(lines, 13), ["aaaaaaaaaa".slice(0, 6) + "\n" + "b".repeat(6), "c".repeat(6)]);
 });

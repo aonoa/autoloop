@@ -70,6 +70,7 @@ const DEFAULTS: Partial<Record<Table, Row>> = {
     attempts: 0,
     ...nulls("claim", "issued", "last_issued", "last_result", "last_answer", "cancel_at", "resume", "session", "link"),
     ...nulls("claimed_at", "seen_at", "finished_at", "summary", "error", "usage"),
+    detail: null,
   },
   cards: {
     ...CARD_BASICS,
@@ -1356,11 +1357,13 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   const { id } = run;
   const rule = ruleNamed(draft, run.rule);
   const summary = result.summary ?? "";
+  const detail = result.detail ?? "";
   const rejected: Rejected[] = [];
   put(draft, "runs", id, {
     state: result.outcome,
     finished_at: draft.at,
     summary,
+    detail,
     error: null,
     cancel_at: null,
     ...(result.report && { report: JSON.stringify(result.report) }),
@@ -1388,7 +1391,8 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
       run: id,
       ...(reply && { reply }),
     };
-    notify(draft, `run:${id}:done`, run.rule, summary, once);
+    // The card is what a channel relays, so it carries the whole report and not just the opening line.
+    notify(draft, `run:${id}:done`, run.rule, [summary, detail].filter(Boolean).join("\n\n"), once);
   }
   for (const later of result.later ?? []) scheduleReview(draft, run, later);
   const emitted: number[] = [];

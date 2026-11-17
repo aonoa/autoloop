@@ -9,6 +9,8 @@ export const ANSWER_BY = 500;
 export const ANSWER_REF = 500;
 /** A channel's own reference to the message it sent. */
 export const DELIVERY_REF = 500;
+/** What a run may say under its one-line conclusion. A card still holds less; the hub keeps the whole report here. */
+export const RESULT_DETAIL = 8000;
 export type Later = { key: string; at?: string; about?: string; cancel?: boolean };
 export type Ask = { title: string; text: string; options: string[]; recommend?: number; about?: string; key?: string };
 export type Notice = { title: string; text: string; key?: string; fyi?: boolean };
@@ -35,6 +37,8 @@ export type Verdict = {
 export type Result = {
   outcome: "done" | "nothing" | "failed" | "cancelled";
   summary?: string;
+  /** What the Agent said under its conclusion: the report itself, shown to the person. */
+  detail?: string;
   error?: string;
   session?: string;
   usage?: Usage;
@@ -346,6 +350,7 @@ export function parseResult(input: unknown): Result {
     !only(result, [
       "outcome",
       "summary",
+      "detail",
       "error",
       "session",
       "usage",
@@ -368,6 +373,7 @@ export function parseResult(input: unknown): Result {
   if (!optional(result.summary, 500) || !optional(result.error, 500) || !optional(result.session, 500)) {
     throw new InputError("summary、error、session 最多 500 字");
   }
+  if (!optional(result.detail, RESULT_DETAIL)) throw new InputError(`detail 最多 ${RESULT_DETAIL} 字`);
   if (!validUsage(result.usage)) throw new InputError("usage 要是对象，里面要是有限的非负数字");
   if (!listOf(result.ask, 5, validAsk)) {
     throw new InputError("ask 每一项要有 title、text 和 2 到 5 个 options，recommend 是其中一个的序号，最多 5 项");

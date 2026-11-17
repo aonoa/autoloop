@@ -260,6 +260,10 @@
           "type": "string",
           "maxLength": 500
         },
+        "detail": {
+          "type": "string",
+          "maxLength": 8000
+        },
         "error": {
           "type": "string",
           "maxLength": 500

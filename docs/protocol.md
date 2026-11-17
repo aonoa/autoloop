@@ -328,7 +328,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 // Result
 {
   "outcome": "done" | "nothing" | "failed" | "cancelled",
-  "summary": "一句话", "error": "没跑成的原因", "session": "…",
+  "summary": "一句话", "detail": "第一行以下的原话", "error": "没跑成的原因", "session": "…",
   "usage": { "input": 0, "output": 0, "cached": 0, "cost": 0 },
   // 下面就是回执，一个事务里一次生效
   "ask":     [{ "title", "text", "options": ["…", "…"], "recommend": 0, "about": "留给接着干的自己", "key": "这件事的固定名字" }],
@@ -342,6 +342,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 ```
 
 - 结果可以重放：响应丢了，同一个 token 再交一次同样的内容，得到同样的确认；内容不同返回 409。
+- `detail` 是 Agent 最后一条消息里第一行以下的全部正文（不含回执代码块），最多 8000 字。只写第一行的结论会把报告丢掉：列出四五个项目、贴一段说明、分点讲清楚原因，这些都在这。中台按原样存进这一轮（`why` 能看到完整内容），规则写了 `tell: "always"` 时，完成通知的卡片正文是「结论 + 空行 + 正文」；通道若一条消息放不下，由通道按行拆成几段发完，不截断。
 - `failed` 会重派，所以它只带 `notice`，其余的不生效；本人要停的这一轮交 `failed` 不再重派，`notice` 也不生效。
 - 需要本人恢复连接、登录或身份验证时，用 `done` 结束本轮并交 `ask`，不交 `failed`。`done` 表示本轮结束，未完成的事项由卡片继续跟进，不代表网页已经验收。同一阻塞已有 `open` 卡片时不重复提问，不用 `later` 定时重试；`waiting` 里同一阻塞已有的复查用 `cancel` 取消。保留已完成业务，`about` 写清恢复后只做哪些剩余步骤。
 - `usage` 由接单程序上报本次执行的用量，包含这次执行的回执重写；每一项都可以没有：`input`、`output`、`cached` 是 Token 数，`cost` 是美元。`input` 是全部输入，包括从缓存读的和写进缓存的；`cached` 是其中从缓存读的部分，价格通常只有一小部分，所以单独列出。中台把同一轮各次执行的已报数值相加，重复提交不重复计费；没有上报的字段保持缺省，不当成零。`agent-autoloop status` 按完成时间汇总今天和最近 7 天已结束的轮次，没上报的轮数如实写出来。
@@ -361,6 +362,8 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 
 ````
 第一行一句话结论。可自动重试的临时失败写「没跑成：原因」，需要本人恢复的阻塞写「待你处理：原因」并交 ask，没事可做写「没事可做：原因」。其余结束本轮，事项由回执继续跟进。
+
+第一行下面写正文：要人看的实际结果、清单、来源和验证情况都写在这里。第一行只是标题，别把正文也压到那一行里；中台会把正文一并留下并发给人。
 
 ```agent-autoloop
 { "ask": [ … ], "notice": [ … ], "resolve": [ … ], "later": [ … ], "events": [ … ], "report": { … } }
