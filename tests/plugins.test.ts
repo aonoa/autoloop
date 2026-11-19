@@ -18,6 +18,7 @@ test("all built-in kinds use the same loader and external plugins take precedenc
     ["feishu", "channel"],
     ["webhook", "channel"],
     ["github", "source"],
+    ["cnb", "source"],
   ] as const)
     assert.ok(await loadPlugin(name, kind));
   mkdirSync(join(home, "plugins", "outside"), { recursive: true });

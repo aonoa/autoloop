@@ -150,6 +150,7 @@ Agent 结束了这一轮，问了你一个问题。它现在不占进程、不�
 | [飞书周报与业务摘要](examples/recipes/feishu-brief/README.md) | 周日 18 点按你的权限读汇报和指定表格，生成本地摘要；飞书只发简短摘要，完整稿留在本机 |
 | [收件箱分诊](examples/recipes/inbox-triage/README.md) | 默认每天 8 点读过去 24 小时的未读邮件，写成清单和回复草稿；不发送、不改邮箱状态 |
 | [PR 自动交付](skills/agent-autoloop/SKILL.md#交付流水线) | 打上 `deliver` 标签后，审查、等 CI、合并、等发布并核对线上版本 |
+| [跟进 CNB 仓库事件](examples/recipes/cnb-events/README.md) | 把 CNB 的 Issue、评论、PR 和 push 变成事件；轮询或流水线转发，规则写法和 GitHub 一样 |
 
 **启用：** 打开对应说明。模板带任务 Skill 时，把它放进所用 Agent 的 skills 目录。把示例规则合入 `~/.agent-autoloop/rules.json`，替换电脑名和路径，再运行 `agent-autoloop check`。
 
@@ -163,12 +164,12 @@ Agent 结束了这一轮，问了你一个问题。它现在不占进程、不�
 
 | 方向 | 内置 | 配置 |
 |---|---|---|
-| **事件**：怎么发现新活 | [GitHub Webhook](plugins/github/source.ts)、[GitLab Webhook](plugins/gitlab/source.ts)、[HTTP 接口](docs/protocol.md#来源把世界变成事件)、[定时规则](skills/agent-autoloop/SKILL.md#改规则)、[Issue 轮询脚本](examples/watch-github-issues.sh) | [说明](skills/agent-autoloop/SKILL.md#接一个事件插件) |
+| **事件**：怎么发现新活 | [GitHub Webhook](plugins/github/source.ts)、[GitLab Webhook](plugins/gitlab/source.ts)、[CNB 仓库动态](plugins/cnb/source.ts)、[HTTP 接口](docs/protocol.md#来源把世界变成事件)、[定时规则](skills/agent-autoloop/SKILL.md#改规则)、[Issue 轮询脚本](examples/watch-github-issues.sh) | [说明](skills/agent-autoloop/SKILL.md#接一个事件插件) |
 | **Agent**：谁来干活 | [Claude Code](plugins/claude/agent.ts)、[Codex](plugins/codex/agent.ts)、[ACP](plugins/acp/agent.ts)、[DeepSeek Harness](plugins/dsh/agent.ts)、[ZCode](plugins/zcode/agent.ts)、[通用命令](plugins/command/agent.ts) | [说明](skills/agent-autoloop/SKILL.md#接一个-agent) |
 | **通道**：去哪找你拍板 | [桌面通知](plugins/desktop/channel.ts)（默认开启）、[飞书](plugins/feishu/channel.ts)、[QQ 机器人](plugins/qq/channel.ts)、[QQ（NapCat）](plugins/napcat/channel.ts)、[钉钉 / 企微 / Slack / Discord](plugins/webhook/templates.ts) | [说明](skills/agent-autoloop/SKILL.md#接一个通道) |
 | **交付**：把 CI/CD 也做成插件 | [`delivery`](plugins/delivery/delivery.ts) | [说明](skills/agent-autoloop/SKILL.md#交付流水线) |
 
-**实测情况：** Claude Code、Codex 和 ACP（官方 Codex ACP 适配器）跑通了多轮问答和跨进程会话续接；ZCode 跑通了提问、回答后接回原会话；飞书跑通了发送、按钮回调和卡片更新；QQ 机器人的 Gateway 鉴权、按钮回调、互动确认和发送用本地假服务验证过，没连过真实 QQ 开放平台；NapCat 通道的发送、引用回答和多卡片拒绝猜测用本地假 OneBot 验证过，没连过真实 NapCat 或 QQ 账号；四种 Webhook 模板只在本地模拟服务上验证过，GitLab Webhook 按官方文档的格式测试，没连过真实 GitLab。文字通道靠回答链接拍板时，要把 `hub.publicUrl` 配成手机或电脑能打开的地址。
+**实测情况：** Claude Code、Codex 和 ACP（官方 Codex ACP 适配器）跑通了多轮问答和跨进程会话续接；ZCode 跑通了提问、回答后接回原会话；飞书跑通了发送、按钮回调和卡片更新；QQ 机器人的 Gateway 鉴权、按钮回调、互动确认和发送用本地假服务验证过，没连过真实 QQ 开放平台；NapCat 通道的发送、引用回答和多卡片拒绝猜测用本地假 OneBot 验证过，没连过真实 NapCat 或 QQ 账号；四种 Webhook 模板只在本地模拟服务上验证过，GitLab Webhook 按官方文档的格式测试，没连过真实 GitLab。CNB 的仓库动态按小时返回逐行事件，插件已在真实接口上只读核对了 Issue、评论、PR、评审、push 和发布事件，并从 Issue 接口补全了正文；还没有真实仓库的事件触发过派活，流水线转发只用文档里的 `CNB_*` 变量做过离线测试。文字通道靠回答链接拍板时，要把 `hub.publicUrl` 配成手机或电脑能打开的地址。
 
 **内置 Agent 走第三方网关。** Claude Code、Codex 要接第三方模型服务，或者启动前要先设好环境变量，写一个设好变量再启动它的小脚本，在 Agent 里写 `"program": "脚本路径"`，会话续接和用量统计照旧，见[说明](skills/agent-autoloop/SKILL.md#接一个-agent)。
 

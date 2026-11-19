@@ -4,6 +4,8 @@
 
 QQ 接入分成两组：推荐使用 InSoulForge 机器人链路，聊天、派发任务和结果通知都由机器人统一处理；官方 QQ 机器人、NapCat 和 `qq-source` 仍是独立的可选插件，适合不经过机器人的直连部署。两组插件都保留，按部署方式选择，不要同时消费同一个 QQ 账号。
 
+CNB 没有仓库级的外发 Webhook，所以它的来源不是一个只在收请求时加载的翻译函数：`plugins/cnb/source.ts` 收流水线转发的 `CNB_*` 字段，`plugins/cnb/poll.ts` 定时读仓库动态，`plugins/cnb/push.ts` 在流水线里负责转发。三者共用 `plugins/cnb/core.ts` 的字段映射，事件类型与 GitHub 对齐，规则可以同样按仓库和编号匹配。见[CNB 配方](../examples/recipes/cnb-events/README.md)。
+
 ## 插件是什么
 
 一个插件是一个目录，入口按类型命名：
