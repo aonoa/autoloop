@@ -96,6 +96,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["title", isTitle, "要是字母或数字开头、不含空白的一个词，占位符只能用 {id}、{subject}", true],
     ["group", isText, NOT_EMPTY, true],
     ["project", isText, NOT_EMPTY, true],
+    ["description", isText, NOT_EMPTY, true],
     ["aliases", isSubjects, "要是对象列表，每一项精确匹配或以 * 结尾", true],
     ["parallel", isCount, "要是正整数", true],
     ["maxActive", isCount, "要是正整数", true],
@@ -192,13 +193,24 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
       checkFields(issues, "rules.json 的 policy.dispatch ", policy.dispatch, [
         ["agent", isText, NOT_EMPTY],
         ["minConfidence", isConfidence, "要是 0 到 1 之间的数", true],
+        ["create", (value) => typeof value === "boolean", "要是 true 或 false", true],
+        ["workers", isWords, "要是节点编号的列表", true],
       ]);
-      const dispatch = policy.dispatch as { agent?: string; minConfidence?: number };
+      const dispatch = policy.dispatch as {
+        agent?: string;
+        minConfidence?: number;
+        create?: boolean;
+        workers?: string[];
+      };
       if (dispatch.agent !== undefined && !Object.hasOwn(rules.agents, dispatch.agent)) {
         issues.push(`rules.json 的 policy.dispatch.agent 不是已登记的 Agent：${dispatch.agent}`);
       }
       if (dispatch.minConfidence !== undefined && dispatch.minConfidence > 1) {
         issues.push("rules.json 的 policy.dispatch.minConfidence 要在 0 到 1 之间");
+      }
+      const known = new Set(Object.values(rules.agents).map((agent) => agent.worker));
+      for (const worker of dispatch.workers ?? []) {
+        if (!known.has(worker)) issues.push(`rules.json 的 policy.dispatch.workers 不是已登记的节点：${worker}`);
       }
     }
     // `accept` is the gate's switch; `fanout` alone must not turn it on.

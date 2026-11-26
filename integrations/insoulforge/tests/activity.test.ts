@@ -78,6 +78,7 @@ test("every submit needs the injected sender; a private chat must match its targ
 test("an unauthorized member cannot enumerate projects", async () => {
   const service = createService(config, {
     submit: async () => ({}),
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => ({ cards: [], runs: [] }),
     answer: async () => ({}),
@@ -101,6 +102,7 @@ test("the injected session fixes the recipient; the model cannot switch to anoth
       seen.push(event);
       return { event: 1, duplicate: false, routed: ["QQ 任务"], paused: [] };
     },
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => ({ cards: [], runs: [] }),
     answer: async () => ({}),
@@ -128,6 +130,7 @@ test("model parameters cannot forge the sender identity", async () => {
       seen.push(event);
       return { event: 1, duplicate: false, routed: ["QQ 任务"], paused: [] };
     },
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => ({ cards: [], runs: [] }),
     answer: async () => ({}),
@@ -191,20 +194,75 @@ test("each project and conversation gets its own lane; the reply stays with the 
   assert.match(shop.id, /^insoulforge:/);
 });
 
+test("a submit without a project hint stays conversation-only so the dispatcher can choose", async () => {
+  const seen: any[] = [];
+  const service = createService(config, {
+    submit: async (event) => {
+      seen.push(event);
+      return {
+        event: 9,
+        duplicate: false,
+        routed: [],
+        paused: [],
+        pending: true,
+        dispatch: { state: "queued", run: 3 },
+      };
+    },
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
+    outcome: async () => ({ runs: [] }),
+    state: async () => ({ cards: [], runs: [] }),
+    answer: async () => ({}),
+  });
+  const result: any = await service.handle(
+    { action: "submit", text: "查一下明天天气", target_session: "private:10001001" },
+    { sender_id: "10001001" },
+  );
+  assert.equal(result.success, true);
+  assert.equal(seen[0].subject, "qq-private-10001001");
+  assert.equal(result.result.project, undefined);
+  assert.equal(result.result.pending, true);
+  assert.match(result.result.ack, /正在判断属于哪个项目/);
+  assert.doesNotMatch(result.result.ack, /没有规则/);
+});
+
+test("an explicit project hint keeps the old lane shape and dispatches directly", async () => {
+  const seen: any[] = [];
+  const service = createService(config, {
+    submit: async (event) => {
+      seen.push(event);
+      return { event: 10, duplicate: false, routed: ["QQ 任务"], paused: [] };
+    },
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
+    outcome: async () => ({ runs: [{ run: 44, state: "queued", summary: "修一下" }] }),
+    state: async () => ({ cards: [], runs: [] }),
+    answer: async () => ({}),
+  });
+  const result: any = await service.handle(
+    { action: "submit", project_hint: "shop", text: "修一下", target_session: "group:20002002" },
+    { sender_id: "10001001" },
+  );
+  assert.equal(result.success, true);
+  assert.equal(seen[0].subject, "qq-group-20002002/shop");
+  assert.equal(result.result.project, "shop");
+  assert.match(result.result.ack, /已派单给 Agent Autoloop（项目：shop/);
+});
+
 test("instructions tell the model where the session comes from and what it may not change", () => {
   const text = instructions(config);
   assert.match(text, /current_session/);
   assert.match(text, /group:<群号>/);
   assert.match(text, /- shop：商城/);
   assert.match(text, /天气、资料、新闻/);
-  assert.match(text, /必须选 general/);
-  assert.match(text, /禁止默认选列表里的第一个项目/);
+  assert.match(text, /可以选 general/);
+  assert.match(text, /不确定就省略 project_hint/);
+  assert.match(text, /不要默认选列表里的第一个项目/);
   assert.match(text, /不是文件路径/);
 });
 
 test("a general task is acknowledged as a general task, not as a code project", async () => {
   const service = createService(config, {
     submit: async () => ({ event: 3, duplicate: false, routed: ["QQ 通用任务"], paused: [] }),
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [{ run: 43, state: "queued", summary: "明天上海天气" }] }),
     state: async () => ({ cards: [], runs: [] }),
     answer: async () => ({}),
@@ -223,6 +281,7 @@ test("a general task is acknowledged as a general task, not as a code project", 
 test("status requires the same trusted operator identity as submit and answer", async () => {
   const service = createService(config, {
     submit: async () => ({}),
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => ({ cards: [], runs: [] }),
     answer: async () => ({}),
@@ -247,7 +306,14 @@ test("status only reports the allowed chats, and a project narrows it further", 
       { id: 3, lane: "qq-private-10001001/site", title: "私聊", text: "z", options: ["a", "b"] },
     ],
     runs: [
-      { id: 10, lane: "qq-group-20002002/shop", state: "claimed", summary: "在改", createdAt: "t" },
+      {
+        id: 10,
+        lane: "qq-group-20002002/shop",
+        state: "claimed",
+        summary: "在改",
+        progress: [{ step: "执行命令：npm test" }, { step: "修改文件：src/app.ts" }],
+        createdAt: "t",
+      },
       { id: 11, lane: "qq-group-20002002/site", state: "queued", summary: "排队", createdAt: "t" },
       { id: 12, lane: "qq-group-999/shop", state: "done", summary: "别人", createdAt: "t" },
       { id: 13, lane: "qq-group-20002002/shop", state: "failed", summary: "", error: "炸了", createdAt: "t" },
@@ -262,6 +328,10 @@ test("status only reports the allowed chats, and a project narrows it further", 
   assert.equal(all.result.counts.queued, 1);
   assert.equal(all.result.counts.waiting, 2);
   assert.ok(all.result.summary.includes("炸了"));
+  assert.ok(all.result.summary.includes("#10 运行中：在改（进展：修改文件：src/app.ts）"));
+  assert.deepEqual(all.result.runs.find((run: any) => run.run === 10).progress.at(-1), {
+    step: "修改文件：src/app.ts",
+  });
   const shop = statusOf(state, config, "group:20002002", "shop") as any;
   assert.deepEqual(
     shop.result.cards.map((card: any) => card.card),
@@ -280,6 +350,7 @@ test("a submit posts one event with the source key's shape and its project lane"
       seen.push(event);
       return { event: 1, duplicate: false, routed: ["QQ 任务"], paused: [] };
     },
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [{ run: 42, state: "queued", summary: "修一下结算页" }] }),
     state: async () => ({ cards: [], runs: [] }),
     answer: async () => ({ changed: true }),
@@ -304,7 +375,7 @@ test("a submit posts one event with the source key's shape and its project lane"
   });
   assert.deepEqual(
     await service.handle({ action: "submit", project: "../etc", text: "x", target_session: "group:20002002" }),
-    { success: false, error: "project 不在允许的项目里" },
+    { success: false, error: "project_hint 不在允许的项目里" },
   );
   assert.deepEqual(
     await service.handle({ action: "submit", project: "shop", text: "x", target_session: "group:999" }),
@@ -315,6 +386,7 @@ test("a submit posts one event with the source key's shape and its project lane"
 test("a group member who is not on the sender allowlist cannot submit", async () => {
   const service = createService(config, {
     submit: async () => ({ routed: ["QQ 任务"] }),
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => ({ cards: [], runs: [] }),
     answer: async () => ({}),
@@ -336,6 +408,7 @@ test("a group member who is not on the sender allowlist cannot submit", async ()
       submitted = true;
       return {};
     },
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => ({
       cards: [{ id: 7, lane: "qq-group-20002002/shop", title: "选", text: "x", options: ["甲", "乙"] }],
@@ -357,6 +430,7 @@ test("a group member who is not on the sender allowlist cannot submit", async ()
 test("a submit the hub accepted but no rule took still returns an honest acknowledgement", async () => {
   const service = createService(config, {
     submit: async () => ({ event: 2, duplicate: false, routed: [], paused: [] }),
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => ({ cards: [], runs: [] }),
     answer: async () => ({}),
@@ -380,6 +454,7 @@ test("an answer is only accepted for an open card in that conversation, and choi
   const answered: any[] = [];
   const service = createService(config, {
     submit: async () => ({}),
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => ({
       cards: [
@@ -431,6 +506,7 @@ test("a hub refusal becomes a normal failed response rather than an exception", 
     submit: async () => {
       throw new Error("中台返回 401：要来源自己的密钥");
     },
+    upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
     outcome: async () => ({ runs: [] }),
     state: async () => {
       throw new Error("连不上");
@@ -511,6 +587,7 @@ test("a local close settles the Activity wait, so a lost handshake reconnects in
     { ...config, activity: { ...config.activity, url } },
     createService(config, {
       submit: async () => ({}),
+      upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
       outcome: async () => ({ runs: [] }),
       state: async () => ({ cards: [], runs: [] }),
       answer: async () => ({}),
@@ -603,6 +680,7 @@ test("serve registers, answers, and notices a closed socket", async () => {
     { ...config, activity: { ...config.activity, url } },
     {
       submit: async () => ({ routed: ["QQ 任务"] }),
+      upload: async () => ({ id: "att_test", name: "screenshot.png", mediaType: "image/png", size: 1 }),
       outcome: async () => ({ runs: [] }),
       state: async () => ({ cards: [], runs: [] }),
       answer: async () => ({}),
@@ -619,4 +697,194 @@ test("serve registers, answers, and notices a closed socket", async () => {
   await running;
   server.closeAllConnections();
   server.close();
+});
+
+test("screenshots from the trusted context are downloaded as bytes and uploaded before the event", async () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9d1QAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const requests: string[] = [];
+  const uploads: any[] = [];
+  let submitted: any;
+  const server = createServer((request, response) => {
+    requests.push(request.url ?? "");
+    assert.equal(request.headers.authorization, `Bearer ${config.activity.token}`);
+    if (request.url?.startsWith("/activities/attachments/img_01234567?")) {
+      response.writeHead(200, { "content-type": "image/png" });
+      response.end(png);
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ success: false, error: "图片票据无效或已过期" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const service = createService(
+      { ...config, activity: { ...config.activity, url: `${base.replace("http", "ws")}/activities/ws` } },
+      {
+        submit: async (event) => {
+          submitted = event;
+          return { event: 11, duplicate: false, routed: ["QQ 任务"], paused: [] };
+        },
+        upload: async (name, mediaType, bytes) => {
+          uploads.push({ name, mediaType, bytes: Buffer.from(bytes) });
+          return { id: "att_0123456789abcdef", name, mediaType, size: bytes.length };
+        },
+        outcome: async () => ({ runs: [] }),
+        state: async () => ({ cards: [], runs: [] }),
+        answer: async () => ({}),
+      },
+    );
+    const result: any = await service.handle(
+      { action: "submit", project: "shop", text: "看截图修页面", target_session: "group:20002002" },
+      {
+        sender_id: "10001001",
+        session_id: "group:20002002",
+        attachments: [{ image_id: "img_01234567", image_index: 0, ticket: "signed.ticket" }],
+      },
+    );
+    assert.equal(result.success, true);
+    assert.match(requests[0] ?? "", /name=autoloop/);
+    assert.match(requests[0] ?? "", /ticket=signed\.ticket/);
+    assert.deepEqual(uploads[0]?.bytes, png);
+    assert.equal(uploads[0]?.mediaType, "image/png");
+    assert.deepEqual(submitted.attachments, [
+      { id: "att_0123456789abcdef", name: uploads[0].name, mediaType: "image/png", size: png.length },
+    ]);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("a screenshot that cannot be downloaded fails the submit instead of dropping the image", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ success: false, error: "图片票据无效或已过期" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  let submitted = false;
+  try {
+    const service = createService(
+      { ...config, activity: { ...config.activity, url: `${base.replace("http", "ws")}/activities/ws` } },
+      {
+        submit: async () => {
+          submitted = true;
+          return {};
+        },
+        upload: async () => {
+          throw new Error("must not upload");
+        },
+        outcome: async () => ({ runs: [] }),
+        state: async () => ({ cards: [], runs: [] }),
+        answer: async () => ({}),
+      },
+    );
+    const result: any = await service.handle(
+      { action: "submit", project: "shop", text: "看截图修页面", target_session: "group:20002002" },
+      {
+        sender_id: "10001001",
+        session_id: "group:20002002",
+        attachments: [{ image_id: "img_01234567", image_index: 0, ticket: "expired.ticket" }],
+      },
+    );
+    assert.equal(result.success, false);
+    assert.match(result.error, /附件没有交上/);
+    assert.match(result.error, /图片票据无效或已过期/);
+    assert.equal(submitted, false);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("documents from the trusted context are uploaded with their own type and name", async () => {
+  const csv = Buffer.from("项目,金额\n医保,100\n", "utf8");
+  const requests: string[] = [];
+  const uploads: any[] = [];
+  let submitted: any;
+  const server = createServer((request, response) => {
+    requests.push(request.url ?? "");
+    assert.equal(request.headers.authorization, `Bearer ${config.activity.token}`);
+    if (request.url?.startsWith("/activities/attachments/file_01234567?")) {
+      response.writeHead(200, { "content-type": "text/csv" });
+      response.end(csv);
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ success: false, error: "文件票据无效或已过期" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const service = createService(
+      { ...config, activity: { ...config.activity, url: `${base.replace("http", "ws")}/activities/ws` } },
+      {
+        submit: async (event) => {
+          submitted = event;
+          return { event: 12, duplicate: false, routed: ["QQ 任务"], paused: [] };
+        },
+        upload: async (name, mediaType, bytes) => {
+          uploads.push({ name, mediaType, bytes: Buffer.from(bytes) });
+          return { id: "att_0123456789abcdef", name, mediaType, size: bytes.length };
+        },
+        outcome: async () => ({ runs: [] }),
+        state: async () => ({ cards: [], runs: [] }),
+        answer: async () => ({}),
+      },
+    );
+    const result: any = await service.handle(
+      { action: "submit", project: "shop", text: "按这张表核对", target_session: "group:20002002" },
+      {
+        sender_id: "10001001",
+        session_id: "group:20002002",
+        attachments: [
+          {
+            attachment_id: "file_01234567",
+            name: "指标.csv",
+            media_type: "text/csv",
+            ticket: "signed.file",
+          },
+        ],
+      },
+    );
+    assert.equal(result.success, true);
+    assert.match(requests[0] ?? "", /ticket=signed\.file/);
+    assert.deepEqual(uploads[0]?.bytes, csv);
+    assert.equal(uploads[0]?.mediaType, "text/csv");
+    assert.deepEqual(submitted.attachments, [
+      { id: "att_0123456789abcdef", name: "指标.csv", mediaType: "text/csv", size: csv.length },
+    ]);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("a file the main program could not download fails the submit instead of dropping it", async () => {
+  let submitted = false;
+  const service = createService(config, {
+    submit: async () => {
+      submitted = true;
+      return { event: 1, duplicate: false, routed: [], paused: [] };
+    },
+    upload: async (name, mediaType, bytes) => ({ id: "att_0123456789abcdef", name, mediaType, size: bytes.length }),
+    outcome: async () => ({ runs: [] }),
+    state: async () => ({ cards: [], runs: [] }),
+    answer: async () => ({}),
+  });
+  const result: any = await service.handle(
+    { action: "submit", project: "shop", text: "看一下", target_session: "group:20002002" },
+    {
+      sender_id: "10001001",
+      session_id: "group:20002002",
+      attachments: [{ name: "指标.csv", error: "文件下载失败：超时" }],
+    },
+  );
+  assert.equal(result.success, false);
+  assert.match(result.error, /指标\.csv|第 1 个文件|超时/);
+  assert.equal(submitted, false);
 });

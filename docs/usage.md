@@ -249,18 +249,46 @@ agent-autoloop run 处理-issue --subject "#42" --reason "手动检查"
 
 发生顺序：
 
-1. 事件先按规则匹配；能匹配就不进入调度。
+1. 任务事件先按规则匹配；能匹配就不进入调度。通知、回答、定时和手动运行不进入调度。
 2. 没匹配时，先看项目的 `when.subjects` 和 `aliases`；能确定就直接派发。
 3. 仍不能确定，才排一轮只读调度轮；调度 Agent 只返回 `route`。
 4. 中台重新校验项目、来源、发送人、节点和置信度；通过才派活。
-5. 不通过就生成“未分配”卡片，不会自动重试或猜项目。
+5. 不通过就生成“未分配”卡片，不会自动重试或猜项目；调度轮自身失败仍记为失败，不伪装成普通未分配。
 
-用 `status` 和 `board` 查看调度结果。调度轮本身可以在 `runs` / `why` 里看到，`kind` 是 `dispatch`，显示名为「调度」。
+### 自动创建项目
+
+默认关闭。需要让调度 Agent 在现有项目都不合适时提议新建项目，在 `policy.dispatch` 里加：
+
+```json
+"dispatch": {
+  "agent": "dispatcher",
+  "minConfidence": 0.7,
+  "create": true,
+  "workers": ["mini", "hub"]
+}
+```
+
+流程：
+
+1. 调度 Agent 返回 `create`，带上项目名、说明、置信度，可选目录、Agent、节点和 `subjects`；
+2. 中台检查开关、置信度、项目是否已存在、目录、节点、Agent 和 `workers` 白名单；
+3. 通过后只写一条待办，事件进入 `creating`，不会立刻派工；
+4. 宿主原子写入 `rules.json` 和可选的 Activity 配置；新规则继承原事件的来源和类型；
+5. 写入成功后事件重新进入调度，由调度 Agent 或确定性路由决定会话；
+6. 写入失败则事件回到 `unassigned`，生成卡片说明原因。
+
+不想让模型自动建项目，就不要写 `create: true`；这样仍可在 `unassigned` 卡片出现后，用 `agent-autoloop project add` 或 owner-only 项目接口手动登记。
+
+调度成功会在原会话回一条“任务已分配”，说明放到了哪个项目；不是任务的聊天，调度可以带 `fyi` 直接答回原会话。外部来源不需要知道项目规则、目录或节点，只需要提交任务事实；不知道项目时事件应答是 `pending: true`，不应当成“没有规则接单”。
+
+用 `status` 和 `board` 查看调度结果。`status` 的“待调度”列出来不及分配的事件；`/v1/state` 的 `dispatching` 和 `totals.dispatching` 给出同样信息。调度轮本身可以在 `runs` / `why` 里看到，`kind` 是 `dispatch`，显示名为「调度」。
 
 注意：
 
 - 调度 Agent 不能改文件、运行命令或发消息；它只是判断。
+- 项目规则写 `description` 给调度 Agent 看；最近一轮、能否续接、上次调度和本人纠正偏好也进快照。
 - 节点离线、项目不能接这个来源/类型、发送人不在 allowlist 时都不会派活。
+- `continue` 只在同项目、同 lane、同 Agent 且会话没被别的轮占用时续接；否则安全新开。
 - 项目正在等本人处理（`person/blocked`、`person/failed`）时，调度和别名都不会强行塞入新工作。
 - 不配置 `policy.dispatch` 时行为不变，未匹配事件只记录。
 
@@ -473,6 +501,10 @@ agent-autoloop project remove shop
 `project list` 会同时显示每个项目的 Agent 和节点；`--json` 里对应 `agent`、`worker` 字段。节点的唯一事实源是 Agent 的 `worker`，项目不会另存一份节点配置，因此不会出现规则与节点表不一致。
 
 `project remove` 只删除该项目自己的规则和 Activity 条目，`general` 通用入口受保护。已有规则和 Activity 配置都可以在运行中修改；`rules.json` 由中台热加载，Activity 配置由 `insoulforge-activity` 监听并在合法变更后重连注册，不需要重启服务。写错时两份服务都保留旧配置。
+
+同样的能力也通过中台的管理接口开放给受信客户端。接口只接受 owner 密钥，和命令行共用同一套校验与原子写入；请求体不能指定 Activity 路径，也不能写未知字段。完整字段和示例见 [API 速查](api.md#项目)。这样远程管理端不必登录服务器，也不会把 `rules.json` 的写入权交给模型或普通任务 Agent。
+
+调度 Agent 默认只**提议**已有项目和会话，不自动创建项目。开启 `policy.dispatch.create: true` 后，它可以提议新建项目，但中台会重新校验置信度、项目名、目录、节点白名单和来源，再由宿主原子写入配置；未开启时仍落成“未分配”卡片，由本人通过 `project add` 或 `POST /v1/projects` 确认后再派活。
 
 ### QQ 机器人直连（可选）
 

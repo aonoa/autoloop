@@ -18,6 +18,14 @@ import { after, before, test } from "node:test";
 import { setup } from "./helpers.ts";
 
 const home = setup("http");
+// Keep the hub's rules file inside this test's home. Host modules read RULES_FILE once, so this has to happen before the
+// dynamic imports below; the fixture itself is shared and must stay untouched.
+const baseRules = JSON.parse(readFileSync(join(import.meta.dirname, "rules.fixture.json"), "utf8"));
+baseRules.sources.qq = { name: "QQ" };
+baseRules.channels.insoulforge = { name: "QQ 机器人" };
+const rulesFile = join(home, "rules.json");
+writeFileSync(rulesFile, JSON.stringify(baseRules, null, 2));
+process.env.AGENT_AUTOLOOP_RULES = rulesFile;
 mkdirSync(join(home, "plugins", "echo"), { recursive: true });
 writeFileSync(
   join(home, "plugins", "echo", "source.ts"),
@@ -99,6 +107,75 @@ test("each door takes its own kind of key and no other", async () => {
   assert.equal(taken.status, 200);
   assert.deepEqual(taken.json.routed, ["意见"]);
   assert.equal(all<{ source: string }>("SELECT source FROM events")[0].source, "app", "the key says who it's from");
+});
+
+test("only the owner registers projects, and the hub writes rules and the Activity list together", async () => {
+  const home = process.env.AGENT_AUTOLOOP_HOME!;
+  const activity = join(home, "activity.json");
+  writeFileSync(
+    activity,
+    JSON.stringify({ allow: { private: ["10001001"], groups: ["20002002"] }, projects: {} }, null, 2),
+  );
+  reloadRules(rulesFile);
+  const previous = process.env.AGENT_AUTOLOOP_ACTIVITY_CONFIG;
+  process.env.AGENT_AUTOLOOP_ACTIVITY_CONFIG = activity;
+  try {
+    const body = {
+      project: "shop",
+      description: "商城",
+      cwd: "/srv/shop",
+      agent: "a1",
+    };
+    for (const key of [undefined, keys.app, keys.w1, keys.chat]) {
+      assert.equal((await call("/v1/projects", { key, body })).status, 401);
+    }
+    assert.equal((await call("/v1/projects", { key: keys.owner, body: { ...body, extra: true } })).status, 400);
+    assert.equal((await call("/v1/projects", { key: keys.owner, body: { ...body, project: "商城" } })).status, 400);
+    assert.equal(
+      (await call("/v1/projects", { key: keys.owner, body: { ...body, activityConfig: "/etc/passwd" } })).status,
+      400,
+    );
+    const added = await call("/v1/projects", { key: keys.owner, body });
+    assert.equal(added.status, 200, added.text);
+    assert.deepEqual(added.json.subjects, ["qq-private-10001001/shop*", "qq-group-20002002/shop*"]);
+    const rules = JSON.parse(readFileSync(join(home, "rules.json"), "utf8"));
+    const shopRule = rules.rules.find((one: any) => one.project === "shop");
+    assert.equal(shopRule.to, "a1");
+    assert.equal(shopRule.cwd, "/srv/shop");
+    const projects = JSON.parse(readFileSync(activity, "utf8")).projects;
+    assert.deepEqual(projects.shop, { description: "商城", rule: "QQ 任务 shop" });
+    const config = getView().get("config", "rules");
+    assert.ok(config && config.value.rules.some((one: any) => one.project === "shop"));
+
+    const listed = await call("/v1/projects", { key: keys.owner });
+    assert.equal(listed.status, 200);
+    const shop = listed.json.find((one: any) => one.project === "shop");
+    assert.equal(shop.rule, "QQ 任务 shop");
+    assert.equal(shop.agent, "a1");
+    assert.equal(shop.cwd, "/srv/shop");
+    assert.equal(shop.worker, "w1");
+    assert.equal((await call("/v1/projects/shop", { key: keys.app, method: "DELETE" })).status, 401);
+    assert.equal((await call("/v1/projects/general", { key: keys.owner, method: "DELETE" })).status, 400);
+    assert.equal((await call("/v1/projects/shop", { key: keys.owner, method: "DELETE" })).status, 200);
+    assert.equal(
+      JSON.parse(readFileSync(join(home, "rules.json"), "utf8")).rules.some((one: any) => one.project === "shop"),
+      false,
+    );
+    assert.equal(
+      getView()
+        .get("config", "rules")!
+        .value.rules.some((one: any) => one.project === "shop"),
+      false,
+      "the rules are reloaded before the delete response returns",
+    );
+    assert.deepEqual(
+      (await call("/v1/projects", { key: keys.owner })).json.some((one: any) => one.project === "shop"),
+      false,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_AUTOLOOP_ACTIVITY_CONFIG;
+    else process.env.AGENT_AUTOLOOP_ACTIVITY_CONFIG = previous;
+  }
 });
 
 test("a bad body is refused", async () => {

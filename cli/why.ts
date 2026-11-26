@@ -46,6 +46,7 @@ export function formatWhy(id: number, facts: Fact[]) {
     if (row.link && row.link === links.get(row.issued) && row.link !== before?.link) add(fact.at, `会话：${row.link}`);
     if (row.finished_at && row.finished_at !== before?.finished_at) {
       add(row.finished_at, `结束：${row.summary || (row.state === "cancelled" ? "已停止" : "没有填写结论")}`);
+      for (const line of String(row.detail ?? "").split("\n")) if (line.trim()) add(row.finished_at, `  ${line}`);
     }
     if (receipt && row.state === "queued" && row.attempts !== before?.attempts) {
       add(fact.at, `本次未完成：${row.error}；重试时间 ${time(row.not_before)}`);
@@ -87,6 +88,17 @@ export function formatWhy(id: number, facts: Fact[]) {
     const receipt = fact.type === "finish" && Boolean(changes.get(`runs:${id}`)?.row);
     for (const [changed, { table, key, row }] of changes) {
       const before = previous.get(changed);
+      if (table === "run_progress" && row?.run_id === id && !before) {
+        add(row.at, `进展：${row.step}`);
+        if (row.detail) {
+          lines.push(
+            ...String(row.detail)
+              .split("\n")
+              .slice(0, 8)
+              .map((line) => `                ${line}`),
+          );
+        }
+      }
       if (table === "events" && row && !before && events.has(row.id)) {
         add(row.received_at, `${taken.has(row.id) ? "触发事件" : "相关资料"}：${eventText(row)}`);
       }

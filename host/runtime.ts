@@ -7,9 +7,10 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { HOME, RULES_FILE } from "./home.ts";
 import { privateDirectory } from "./files.ts";
 import { skippedOf, stateOf as state, viewStatements } from "./state.ts";
+import { addProject, listProjects, removeProject, validateProject } from "./projects.ts";
 import { cardHash, digest, whose as keyHolder } from "../kernel/credentials.ts";
 import { decide } from "../kernel/decide.ts";
-import { NotFound } from "../kernel/errors.ts";
+import { InputError, NotFound } from "../kernel/errors.ts";
 import { initialize, rows, statement, type Fact, type Row, type Table } from "../kernel/evolve.ts";
 import * as query from "../kernel/query.ts";
 import { commitLatest, openView } from "../kernel/store.ts";
@@ -93,6 +94,42 @@ export function execute(type: string, args: any[], now = Date.now()) {
   return value;
 }
 
+/** What the dispatcher asked to create, still waiting for the host to write it. */
+export const pendingCreations = () =>
+  rows(getView(), "project_creations", { state: "pending" }).sort((a, b) => a.id - b.id);
+
+/** Apply one proposed project, then tell the kernel the write succeeded or failed. The config write is the host's job. */
+export function applyCreation(creation: Row, now = Date.now()) {
+  if (creation.state !== "pending") return { applied: false };
+  try {
+    const result = addProject(
+      validateProject({
+        project: creation.project,
+        description: creation.description,
+        source: creation.source,
+        ...(creation.event_type && { types: [creation.event_type] }),
+        ...(creation.cwd && { cwd: creation.cwd }),
+        ...(creation.agent && { agent: creation.agent }),
+        ...(creation.worker && { worker: creation.worker }),
+        ...(creation.subjects &&
+          JSON.parse(creation.subjects).length && {
+            subjects: JSON.parse(creation.subjects),
+          }),
+      }),
+      RULES_FILE,
+    );
+    execute("projectCreationResult", [creation.id, "applied", null], now);
+    reloadRules(RULES_FILE);
+    execute("projectCreated", [creation.event_id, result.project], now);
+    return { applied: true, project: result };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    execute("projectCreationResult", [creation.id, "failed", message], now);
+    execute("projectCreationFailed", [creation.event_id, message], now);
+    return { applied: false, error: message };
+  }
+}
+
 export const parseRules = (json: string, now = Date.now()) =>
   checkRules(json, now, Intl.DateTimeFormat().resolvedOptions().timeZone);
 export let rules = query.configuration(current);
@@ -159,6 +196,28 @@ export function stateOf(now = Date.now(), before?: number) {
     };
   } finally {
     db.exec("COMMIT");
+  }
+}
+
+/** Project registration at the hub's own door: no model, no plugin, and only the owner's key reaches it. */
+export function project(action: "add" | "remove" | "list", input?: unknown) {
+  try {
+    if (action === "list") return listProjects(RULES_FILE);
+    if (action === "remove") {
+      const result = removeProject(input, RULES_FILE);
+      // Removing a rule is a configuration change too; make the next read and the next claim use it immediately.
+      reloadRules(RULES_FILE);
+      return result;
+    }
+    const parsed = validateProject(input);
+    const result = addProject(parsed, RULES_FILE);
+    // The rules file watcher will also see this write; applying it now makes the response true as soon as it returns.
+    reloadRules(RULES_FILE);
+    return result;
+  } catch (error) {
+    // Configuration mistakes are the caller's: answer 400 rather than turning them into a hub failure.
+    if (error instanceof Error && !(error instanceof InputError)) throw new InputError(error.message);
+    throw error;
   }
 }
 

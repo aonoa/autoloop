@@ -55,7 +55,8 @@
 | gate     | `admit`                                              | 确定性准入                   |
 | 研判     | `kind: "assess"`、`assessPrompt`、`applyVerdict`     | 普通 Agent 轮次              |
 | 预演     | `kind: "speculate"`、`speculateWords`                | 值得才转正式轮               |
-| 调度     | `kind: "dispatch"`、`dispatchSnapshot`、`applyRoute` | 只读控制面，模型只给 `route` |
+| 调度     | `kind: "dispatch"`、`dispatchSnapshot`、`applyRoute` | 只读翻译层，模型给 `route`、`create` 或带 `fyi` 的直接回复 |
+| 项目创建 | `project_creations`、`pendingCreations`、`applyCreation` | 内核提议，宿主写配置 |
 | 别名路由 | `byAlias`、`rule.aliases`                            | 确定性优先，不走模型         |
 | 扇出     | `fanOut`、`policy.fanout`                            | 只加上下文                   |
 | 线程召回 | `Job.thread`、`threadOf`                             | 稳定引用                     |
@@ -73,9 +74,11 @@
 | 普通（无 `kind`） | 规则命中、定时、回答、复查、手动运行 | 规则配置    | 正式工作                         |
 | `assess`          | `policy.accept: "assess"`            | 强制 `read` | 提交 `verdict`，决定是否派正式轮 |
 | `speculate`       | `speculate: true`                    | 强制 `read` | 回执 `report` 决定是否转正式轮   |
-| `dispatch`        | `policy.dispatch`，事件未匹配        | 强制 `read` | 回执 `route`，由中台复核后派发   |
+| `dispatch`        | `policy.dispatch`，任务事件未匹配    | 强制 `read` | 回执 `route`、`create` 或 `fyi` 回复，由中台复核后派发/回话/建项目 |
 
-研判、预演和调度都按排队时的 Agent 领取，规则重载不改派。研判和预演只结算真正接下的事件；调度轮一轮只读一个事件，扇出上下文不作为授权依据。调度轮使用保留内部规则名 `__dispatch__`，不会与用户规则重名；对外显示为「调度」。
+研判、预演和调度都按排队时的 Agent 领取，规则重载不改派。研判和预演只结算真正接下的事件；调度轮一轮只读一个事件，扇出上下文不作为授权依据。调度轮使用保留内部规则名 `__dispatch__`，不会与用户规则重名；对外显示为「调度」。调度成功、直接回复和未分配卡片都继承原事件 `reply`，并写 `dispatch_decisions`；本人纠正另写 `dispatch_corrections` 和 `dispatch_preferences`，下次快照可读。
+
+调度提议新建项目时，内核只写 `project_creations`，事件进入 `creating`。事实提交后，宿主在 `queueMicrotask` 中调用 `pendingCreations` 和 `applyCreation`，由 `host/projects.ts` 原子写入 `rules.json` 与可选的 Activity 配置。成功写 `projectCreated` 并把事件重新排入调度；失败写 `projectCreationFailed` 并回到未分配卡片。新规则继承事件的来源和类型，`create.confidence` 低于 `minConfidence`、项目重复、目录不合法、节点不在 `workers` 白名单时都不会写配置。
 
 ## 决策顺序
 
@@ -92,12 +95,12 @@
 9. 若规则 `speculate`，排预演轮而不是正式轮；
 10. 若没有匹配，先按 `when.subjects` / `aliases` 做确定性路由；
 11. 仍未放置且配置 `policy.dispatch`，为这个事件单独排一轮 `dispatch`；
-12. 调度回执经 `applyRoute` 复核后，走与普通事件相同的 `placeEvent` / `dispatch`；
+12. 调度回执经 `applyRoute` 复核后，走与普通事件相同的 `placeEvent` / `dispatch`；若回执是 `create`，只记 `project_creations` 待办，由宿主写配置后重新调度；
 13. 真正派发后写授权、标记 `routed`，按需扇出。
 
 内部事件（回答、定时、复查、补跑、手动运行）没有独立 gate：真正派发时补一条 `accept` 决定，已有接受决定则不重复。
 
-调度只处理真正未匹配的外部事件；被 Policy 拒绝、超过 8 层、项目正在等本人处理（`person/blocked` / `person/failed`）时都不会强行派活。别名路由同样受事项阻塞约束。
+调度只处理真正未匹配的任务外部事件；通知、回答、定时和手动运行不进入。被 Policy 拒绝、超过 8 层、项目正在等本人处理（`person/blocked` / `person/failed`）时都不会强行派活。别名路由同样受事项阻塞约束。没有项目提示的外部提交使用会话级 subject，调度放到项目后再规范为 `<会话>/<项目>`，避免两个项目共享上下文。
 
 ## 事实与投影
 

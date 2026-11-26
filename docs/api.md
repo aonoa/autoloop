@@ -15,43 +15,46 @@
 
 ## 密钥种类
 
-| 种类 | 能做什么 |
-| --- | --- |
-| `source` | 发事件、查自己发出的事件结果、发 `tell` |
-| `worker` | 领活、心跳、发 `tell` 或定时任务提问；提交 started/result 使用该轮 token |
-| `channel` | 领卡片、报告投递、以平台身份回答 |
-| `owner` | 看状态、日志流、回答、结案、停止、暂停、恢复、补跑、手动运行、删除密钥 |
+| 种类      | 能做什么                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| `source`  | 发事件、查自己发出的事件结果、发 `tell`                                  |
+| `worker`  | 领活、心跳、发 `tell` 或定时任务提问；提交 started/result 使用该轮 token |
+| `channel` | 领卡片、报告投递、以平台身份回答                                         |
+| `owner`   | 看状态、日志流、回答、结案、停止、暂停、恢复、补跑、手动运行、删除密钥   |
 
 密钥只保存哈希。卡片链接和轮次 token 由 `master.key` 派生。
 
 ## 端点矩阵
 
-| 方法 | 路径 | 鉴权 | 作用 |
-| --- | --- | --- | --- |
-| `GET` | `/healthz` | 无 | 健康检查，返回 `{ ok, commit }` |
-| `POST` | `/v1/events` | source | 写入标准事件 |
-| `GET` | `/v1/events/<编号>` | source | 查自己发出事件的结果 |
-| `POST` | `/v1/in/<来源>` | 无（插件验签） | Webhook 入口，交给来源插件翻译 |
-| `GET` | `/v1/work` | worker | 长轮询领活、心跳 |
-| `POST` | `/v1/runs/<轮次>/started` | 轮次 token | 报告会话和链接 |
-| `POST` | `/v1/runs/<轮次>/result` | 轮次 token | 提交结果和回执 |
-| `POST` | `/v1/runs/<轮次>/cancel` | owner | 停止一轮 |
-| `GET` | `/v1/runs/<轮次>/why` | owner | 查一轮时间线 |
-| `GET` | `/v1/cards/next` | channel | 长轮询领取卡片 |
-| `POST` | `/v1/cards/<卡片>/delivered` | channel | 报告已送达 |
-| `POST` | `/v1/cards/<卡片>/failed` | channel | 报告投递失败 |
-| `POST` | `/v1/cards/<卡片>/answer` | channel 或 owner | 回答卡片 |
-| `POST` | `/v1/cards/<卡片>/resolve` | owner | 结案 |
-| `POST` | `/v1/tell` | source 或 worker | 主动告知或定时任务提问 |
-| `GET` | `/v1/state` | owner | 看全局状态 |
-| `GET` | `/v1/stream` | owner | SSE 日志流 |
-| `POST` | `/v1/rules/<规则>/pause` | owner | 暂停规则 |
-| `POST` | `/v1/rules/<规则>/resume` | owner | 恢复规则 |
-| `POST` | `/v1/rules/<规则>/run` | owner | 立即运行 |
-| `POST` | `/v1/rules/<规则>/replay` | owner | 补跑暂停跳过的事件 |
-| `DELETE` | `/v1/keys/<种类>/<名字>` | owner | 删除密钥 |
-| `GET` | `/c/<链接 token>` | 链接 token | 卡片表单 |
-| `POST` | `/c/<链接 token>` | 链接 token | 提交卡片表单 |
+| 方法     | 路径                         | 鉴权             | 作用                                       |
+| -------- | ---------------------------- | ---------------- | ------------------------------------------ |
+| `GET`    | `/healthz`                   | 无               | 健康检查，返回 `{ ok, commit }`            |
+| `POST`   | `/v1/events`                 | source           | 写入标准事件                               |
+| `GET`    | `/v1/events/<编号>`          | source           | 查自己发出事件的结果                       |
+| `POST`   | `/v1/in/<来源>`              | 无（插件验签）   | Webhook 入口，交给来源插件翻译             |
+| `GET`    | `/v1/work`                   | worker           | 长轮询领活、心跳                           |
+| `POST`   | `/v1/runs/<轮次>/started`    | 轮次 token       | 报告会话和链接                             |
+| `POST`   | `/v1/runs/<轮次>/result`     | 轮次 token       | 提交结果和回执                             |
+| `POST`   | `/v1/runs/<轮次>/cancel`     | owner            | 停止一轮                                   |
+| `GET`    | `/v1/runs/<轮次>/why`        | owner            | 查一轮时间线                               |
+| `GET`    | `/v1/cards/next`             | channel          | 长轮询领取卡片                             |
+| `POST`   | `/v1/cards/<卡片>/delivered` | channel          | 报告已送达                                 |
+| `POST`   | `/v1/cards/<卡片>/failed`    | channel          | 报告投递失败                               |
+| `POST`   | `/v1/cards/<卡片>/answer`    | channel 或 owner | 回答卡片                                   |
+| `POST`   | `/v1/cards/<卡片>/resolve`   | owner            | 结案                                       |
+| `POST`   | `/v1/tell`                   | source 或 worker | 主动告知或定时任务提问                     |
+| `GET`    | `/v1/state`                  | owner            | 看全局状态                                 |
+| `GET`    | `/v1/stream`                 | owner            | SSE 日志流                                 |
+| `POST`   | `/v1/rules/<规则>/pause`     | owner            | 暂停规则                                   |
+| `POST`   | `/v1/rules/<规则>/resume`    | owner            | 恢复规则                                   |
+| `POST`   | `/v1/rules/<规则>/run`       | owner            | 立即运行                                   |
+| `POST`   | `/v1/rules/<规则>/replay`    | owner            | 补跑暂停跳过的事件                         |
+| `DELETE` | `/v1/keys/<种类>/<名字>`     | owner            | 删除密钥                                   |
+| `GET`    | `/v1/projects`               | owner            | 列出项目、规则、Agent 和节点               |
+| `POST`   | `/v1/projects`               | owner            | 新增或更新项目，同时写规则和 Activity 清单 |
+| `DELETE` | `/v1/projects/<项目>`        | owner            | 删除项目自己的规则和 Activity 条目         |
+| `GET`    | `/c/<链接 token>`            | 链接 token       | 卡片表单                                   |
+| `POST`   | `/c/<链接 token>`            | 链接 token       | 提交卡片表单                               |
 
 ## 来源
 
@@ -97,7 +100,7 @@ GET /v1/events/12
 Authorization: Bearer <source-key>
 ```
 
-返回 `event`、`routed`、`paused`、`refused` 和 `runs`。只有来源自己通过 `/v1/events` 发出的事件可查；别的来源看到的是 404。
+返回 `event`、`routed`、`paused`、`refused`、`dispatch`、`pending` 和 `runs`。只有来源自己通过 `/v1/events` 发出的事件可查；别的来源看到的是 404。`dispatch` 记着调度进度：`queued` / `running` / `creating` / `placed` / `replied` / `unassigned` / `failed`；前三种同时带 `pending: true`。`creating` 表示调度已提议新建项目，正在等待宿主写入配置。
 
 ## `tell`
 
@@ -142,12 +145,12 @@ Authorization: Bearer <worker-key>
 
 参数：
 
-| 参数 | 必填 | 说明 |
-| --- | --- | --- |
-| `claim` | 是 | 本次领活编号，最多 200 字 |
-| `wait` | 否 | 长轮询秒数，最大 50 |
-| `running` | 否 | 正在执行的轮次，逗号分隔 |
-| `capacity` | 否 | `0` 表示满员，不领新活 |
+| 参数       | 必填 | 说明                      |
+| ---------- | ---- | ------------------------- |
+| `claim`    | 是   | 本次领活编号，最多 200 字 |
+| `wait`     | 否   | 长轮询秒数，最大 50       |
+| `running`  | 否   | 正在执行的轮次，逗号分隔  |
+| `capacity` | 否   | `0` 表示满员，不领新活    |
 
 响应：
 
@@ -285,24 +288,27 @@ Authorization: Bearer <owner-key>
 
 主要字段：
 
-| 字段 | 说明 |
-| --- | --- |
-| `seq` | 当前日志序号，可用于 `/v1/stream?after=` |
-| `now`、`timezone` | 当前时间和时区 |
-| `spending` | 今天和最近 7 天的轮数、Token、费用 |
-| `totals` | 运行、排队、重试、完成、未知等计数 |
-| `cards`、`recentCards` | 待处理和最近卡片 |
-| `timers` | 未到期复查 |
-| `sources` | 来源和事件数 |
-| `lines` | 规则、下次定时、统计、暂停 |
-| `pauses`、`skipped` | 暂停和跳过事件 |
-| `elsewhere` | 外部定时任务 |
-| `agents`、`channels` | 在线状态 |
-| `runs` | 最近轮次，默认 60 条 |
-| `matters` | 活事项及阶段 |
-| `decisions`、`mandates` | 最近 50 条审计 |
-| `hasMore`、`nextBefore` | 分页 |
-| `unrouted` | 没有匹配规则的事件 |
+| 字段                                                              | 说明                                                                          |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `seq`                                                             | 当前日志序号，可用于 `/v1/stream?after=`                                      |
+| `now`、`timezone`                                                 | 当前时间和时区                                                                |
+| `spending`                                                        | 今天和最近 7 天的轮数、Token、费用                                            |
+| `totals`                                                          | 运行、排队、重试、完成、未知等计数                                            |
+| `cards`、`recentCards`                                            | 待处理和最近卡片                                                              |
+| `timers`                                                          | 未到期复查                                                                    |
+| `sources`                                                         | 来源和事件数                                                                  |
+| `lines`                                                           | 规则、下次定时、统计、暂停                                                    |
+| `pauses`、`skipped`                                               | 暂停和跳过事件                                                                |
+| `elsewhere`                                                       | 外部定时任务                                                                  |
+| `agents`、`channels`                                              | 在线状态                                                                      |
+| `runs`                                                            | 最近轮次，默认 60 条                                                          |
+| `matters`                                                         | 活事项及阶段                                                                  |
+| `decisions`、`mandates`                                           | 最近 50 条审计                                                                |
+| `hasMore`、`nextBefore`                                           | 分页                                                                          |
+| `unrouted`                                                        | 没有匹配规则、也不在等待调度的事件                                            |
+| `dispatching`、`totals.dispatching`                               | 正在排队、执行调度或等待新建项目配置的事件（`queued`、`running`、`creating`） |
+| `dispatchDecisions`、`dispatchCorrections`、`dispatchPreferences` | 最近调度结果、本人纠正和偏好                                                  |
+| `projectCreations`                                                | 最近 50 条自动创建项目提议：项目、来源/类型、置信度、状态、错误和时间         |
 
 ### 日志流
 
@@ -337,6 +343,76 @@ POST /v1/rules/<规则>/run
 ```
 
 暂停和立即运行互斥；暂停中调用 `run` 返回 409。
+
+## 项目
+
+项目接口只对 `owner` 开放，和 `agent-autoloop project` 共用 `host/projects.ts` 的校验与写入逻辑。它更新中台自己的 `rules.json`；如果配置了 InSoulForge Activity，还会把同一项目写进 Activity 的 `projects` 清单。两份文件先一起校验，再原子写入；失败时不会留下半套配置。模型和普通任务 Agent 都不能直接改这两份文件。
+
+### 列出项目
+
+```http
+GET /v1/projects
+Authorization: Bearer <owner-key>
+```
+
+返回项目数组，每项包含：
+
+| 字段          | 说明                                                          |
+| ------------- | ------------------------------------------------------------- |
+| `project`     | 项目短名                                                      |
+| `description` | 给调度 Agent 看的项目说明；只有规则、没有 Activity 条目时为空 |
+| `rule`        | 绑定规则名；没有绑定时为空                                    |
+| `cwd`         | 规则的工作目录                                                |
+| `agent`       | 执行该项目的 Agent                                            |
+| `worker`      | Agent 所在节点；唯一事实源是 Agent 配置                       |
+| `source`      | 规则的来源                                                    |
+| `subjects`    | 规则匹配的 `subject`                                          |
+
+### 新增或更新项目
+
+```http
+POST /v1/projects
+Authorization: Bearer <owner-key>
+Content-Type: application/json
+
+{
+  "project": "shop",
+  "description": "商城前端、结算与订单流程",
+  "cwd": "/srv/shop",
+  "worker": "hub",
+  "agent": "codex"
+}
+```
+
+字段：
+
+| 字段          | 必填 | 说明                                                                                          |
+| ------------- | ---- | --------------------------------------------------------------------------------------------- |
+| `project`     | 是   | 字母、数字和 `. _ -`，最多 40 个字符                                                          |
+| `description` | 是   | 项目说明，给调度 Agent 和卡片使用                                                             |
+| `cwd`         | 否   | 工作目录，省略时沿用现有规则或 `~/<项目>`                                                     |
+| `worker`      | 否   | 目标节点；必须已有 Agent，省略时沿用现有 Agent                                                |
+| `agent`       | 否   | 执行 Agent；写了 `worker` 时必须就在该节点上                                                  |
+| `rule`        | 否   | 规则名，默认 `QQ 任务 <项目>`（非 QQ 来源为 `任务 <项目>`）                                   |
+| `subjects`    | 否   | 覆盖默认 `subjects`；最多 100 条，每条最多 300 字                                             |
+| `types`       | 否   | 覆盖规则接受的事件类型；默认 QQ 项目用 `qq.task`、`card.answered`，自动创建时继承触发事件类型 |
+| `resume`      | 否   | 是否续接上一轮会话；新项目默认 `true`                                                         |
+| `source`      | 否   | 规则来源，默认 `qq`                                                                           |
+
+HTTP 请求不接受 `activityConfig`：接口只写中台配置好的 Activity 文件，不能借请求指定任意路径。未知字段同样返回 400。
+
+成功时返回 `project`、`description`、`rule`、`cwd`、`agent`、`worker`、`created`、`activity` 和 `subjects`。`activity` 为 `null` 表示没有找到 Activity 配置，只更新了 `rules.json`。写入后中台立即重载规则，随后的 `GET /v1/projects` 和派工都使用新配置。
+
+### 删除项目
+
+```http
+DELETE /v1/projects/shop
+Authorization: Bearer <owner-key>
+```
+
+删除该项目自己的规则和 Activity 条目，返回 `{ "project": "shop", "rules": ["QQ 任务 shop"] }`。`general` 通用入口受保护，删除返回 400。项目不存在同样返回 400。
+
+非 owner 密钥、缺少密钥调用以上接口都返回 401。
 
 ## 健康检查
 

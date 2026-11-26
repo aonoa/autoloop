@@ -22,12 +22,22 @@ export type Config = {
   projects: Record<string, Project>;
 };
 
+type Attachment = {
+  image_id: string;
+  message_id?: string;
+  image_index?: number;
+  description?: string;
+  ticket: string;
+};
+type EventAttachment = { id: string; name: string; mediaType: string; size: number };
 type Incoming = { type?: string };
 type Request = { type?: string; parameters?: unknown; context?: unknown };
 type Outgoing = Record<string, unknown> & { type: string };
 
 export type Hub = {
   submit(event: Record<string, unknown>): Promise<unknown>;
+  /** Upload already-downloaded image bytes and get the hub reference an event may carry. */
+  upload(name: string, mediaType: string, bytes: Uint8Array): Promise<EventAttachment>;
   /** What the hub recorded for an event just submitted: its run, if a rule took it. */
   outcome(event: number): Promise<any>;
   state(): Promise<any>;
@@ -36,7 +46,8 @@ export type Hub = {
 
 type Submit = {
   action: "submit";
-  project: string;
+  project?: string;
+  project_hint?: string;
   text: string;
   target_session: string;
 };
@@ -53,20 +64,21 @@ export function instructions(config: Config) {
     .join("\n");
   const general = Object.hasOwn(config.projects, "general")
     ? `
-  - 与代码仓库无关的通用任务（天气、资料、新闻、计算、普通查询等）必须选 general；不要塞进 sub2api、foxcard 或其他代码项目。
-  - 只有明确涉及某个代码项目时才选对应项目；不确定时先问用户，禁止默认选列表里的第一个项目。`
+  - 明确是天气、资料、新闻、计算、普通查询这类与代码仓库无关的任务，可以选 general。
+  - 明确涉及某个代码项目时才选对应项目；不确定就省略 project_hint，交给 Autoloop 的调度 Agent 判断，不要默认选列表里的第一个项目。`
     : "";
   return `用于把人交代的工作交给 Agent Autoloop，并查询进度或回答它的提问。
 
 必须传 action，取值为 submit、status、answer、projects 之一。
 
 submit：提交一个新任务。
-  - project：项目短名，只能是下列之一（不是文件路径）：
+  - project_hint：可选的项目短名，只能是下列之一（不是文件路径）；拿不准时不要填，Autoloop 的调度 Agent 会判断：
 ${projects}${general}
   - text：任务原话，最多 4000 字。
+  - 用户在本轮发来的截图、图片和文件会由主程序放进可信 context.attachments，并由本服务自动转交；你不能在 parameters 里写附件 ID 或票据，也不用把图片描述当成原图。
   - target_session：从本轮 current_session 复制，规则见下节；服务会与应用注入的当前会话核对。
-  - 成功返回 run/project/target_session/routed，以及可直接发给用户的 ack 文案。
-  - 提交成功后，必须先把 ack 或等价的一句话发给用户，明确说明“已派单”、项目名和任务摘要；不要只调用 submit 就结束。
+  - 成功返回 run/target_session/routed，以及可直接发给用户的 ack 文案；没有 hint 时 project 可能为空，表示正在判断项目。
+  - 提交成功后，必须先把 ack 或等价的一句话发给用户；没有 hint 时说明“已提交，正在判断属于哪个项目”，不要说“没有规则接单”。
   - 如果当前消息不是任务，只是在聊天、确认、道谢，不要调用本 Activity，直接回复。
 
 status：查看进度。
@@ -243,18 +255,26 @@ export function replyOf(target: string) {
  * taken from model parameters. Treating a group id as a person would make Policy names and allowlists compare against
  * the wrong thing, and would let any group member inherit the bot's authority.
  */
-export function eventOf(target: string, project: string, text: string, actor: string, id: string = randomUUID()) {
+export function eventOf(
+  target: string,
+  project: string | undefined,
+  text: string,
+  actor: string,
+  id: string = randomUUID(),
+  attachments?: EventAttachment[],
+) {
   const detail = text.slice(0, MAX_TEXT);
   if (!detail.trim()) throw new Error("任务不能为空");
   if (!actor) throw new Error("allow.actor 不能为空");
   return {
     id: `insoulforge:${id}`,
     type: "qq.task",
-    subject: subjectOf(target, project),
+    subject: project ? subjectOf(target, project) : replyOf(target),
     summary: detail.slice(0, 200),
     detail,
     actor,
     reply: replyOf(target),
+    ...(attachments?.length && { attachments }),
   };
 }
 
@@ -271,11 +291,13 @@ function number(value: any) {
 }
 
 function laneProject(lane: unknown) {
-  return typeof lane === "string" ? (lane.split("/").at(-1) ?? "") : "";
+  return typeof lane === "string" && lane.includes("/") ? (lane.split("/").at(-1) ?? "") : "";
 }
 
 function laneMatch(lane: unknown, target: string, project?: string) {
-  if (typeof lane !== "string" || !lane.startsWith(`qq-${target.replace(":", "-")}/`)) return false;
+  if (typeof lane !== "string") return false;
+  const conversation = `qq-${target.replace(":", "-")}`;
+  if (lane !== conversation && !lane.startsWith(`${conversation}/`)) return false;
   return !project || laneProject(lane) === project;
 }
 
@@ -283,9 +305,11 @@ function laneMatch(lane: unknown, target: string, project?: string) {
 export function statusOf(state: any, config: Config, target?: string, project?: string) {
   const allowedLanes = new Set<string>();
   for (const privateId of config.allow.private)
-    for (const name of Object.keys(config.projects)) allowedLanes.add(laneOf(`private:${privateId}`, name));
+    for (const name of ["", ...Object.keys(config.projects)])
+      allowedLanes.add(name ? laneOf(`private:${privateId}`, name) : replyOf(`private:${privateId}`));
   for (const groupId of config.allow.groups)
-    for (const name of Object.keys(config.projects)) allowedLanes.add(laneOf(`group:${groupId}`, name));
+    for (const name of ["", ...Object.keys(config.projects)])
+      allowedLanes.add(name ? laneOf(`group:${groupId}`, name) : replyOf(`group:${groupId}`));
   const visible = (lane: unknown) => typeof lane === "string" && allowedLanes.has(lane);
   const cards = (Array.isArray(state?.cards) ? state.cards : []).filter(
     (card: any) =>
@@ -304,12 +328,11 @@ export function statusOf(state: any, config: Config, target?: string, project?: 
   const lines = [
     `排队 ${active.filter((run: any) => run.state === "queued").length} 个，运行中 ${active.filter((run: any) => run.state === "claimed").length} 个，等待回答 ${cards.length} 张。`,
     ...cards.map((card: any) => `等待回答卡片 #${card.id}（${laneProject(card.lane)}/${card.title}）`),
-    ...active
-      .slice(0, MAX_RECENT)
-      .map(
-        (run: any) =>
-          `#${run.id} ${run.state === "claimed" ? "运行中" : "排队中"}：${run.summary || laneProject(run.lane) || run.rule}`,
-      ),
+    ...active.slice(0, MAX_RECENT).map((run: any) => {
+      const task = run.summary || laneProject(run.lane) || run.rule;
+      const step = Array.isArray(run.progress) ? run.progress.at(-1)?.step : "";
+      return `#${run.id} ${run.state === "claimed" ? "运行中" : "排队中"}：${task}${step ? `（进展：${step}）` : ""}`;
+    }),
     ...failed.map((run: any) => `#${run.id} 失败：${run.error || "没有说明"}`),
     ...done.map((run: any) => `#${run.id} 完成：${run.summary || "没有回执"}`),
   ];
@@ -324,7 +347,7 @@ export function statusOf(state: any, config: Config, target?: string, project?: 
       },
       cards: cards.map((card: any) => ({
         card: card.id,
-        project: laneProject(card.lane),
+        ...(laneProject(card.lane) && { project: laneProject(card.lane) }),
         lane: card.lane,
         title: card.title,
         text: card.text,
@@ -332,11 +355,12 @@ export function statusOf(state: any, config: Config, target?: string, project?: 
       })),
       runs: [...active, ...failed, ...done].slice(0, MAX_RECENT).map((run: any) => ({
         run: run.id,
-        project: laneProject(run.lane),
+        ...(laneProject(run.lane) && { project: laneProject(run.lane) }),
         lane: run.lane,
         state: run.state,
         summary: run.summary || "",
         error: run.error || "",
+        ...(Array.isArray(run.progress) && run.progress.length ? { progress: run.progress } : {}),
         createdAt: run.createdAt,
         finishedAt: run.finishedAt,
       })),
@@ -345,6 +369,96 @@ export function statusOf(state: any, config: Config, target?: string, project?: 
 }
 
 export type Service = ReturnType<typeof createService>;
+
+/** The Activity's HTTP base, derived from the same host as its WebSocket endpoint. */
+function activityHttpBase(config: Config) {
+  const url = new URL(config.activity.url);
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  url.pathname = "";
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/$/, "");
+}
+
+/** Download the exact files the main program signed for this request, never an id from model text. */
+async function downloadAttachments(config: Config, hub: Hub, context: unknown, log: (line: string) => void) {
+  const raw =
+    context && typeof context === "object" && !Array.isArray(context) ? (context as any).attachments : undefined;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 8) throw new Error("本轮附件格式不正确或超过 8 个");
+  const uploaded: EventAttachment[] = [];
+  for (const [index, item] of raw.entries()) {
+    if (item && typeof item === "object" && typeof item.error === "string") {
+      throw new Error(`第 ${index + 1} 个文件取不回来：${item.error}`);
+    }
+    if (!item || typeof item !== "object" || typeof item.ticket !== "string") {
+      throw new Error(`第 ${index + 1} 个附件缺少签名票据`);
+    }
+    if (typeof item.attachment_id === "string") {
+      if (!/^file_[0-9a-f]{8}$/.test(item.attachment_id)) throw new Error("文件编号格式不正确");
+      const mediaType = typeof item.media_type === "string" ? item.media_type : "";
+      const name = typeof item.name === "string" ? item.name : "";
+      if (!mediaType || !name) throw new Error(`第 ${index + 1} 个文件缺少类型或文件名`);
+      const url = new URL(
+        `${activityHttpBase(config)}/activities/attachments/${encodeURIComponent(item.attachment_id)}`,
+      );
+      url.searchParams.set("name", config.activity.name ?? "autoloop");
+      url.searchParams.set("ticket", item.ticket);
+      const response = await fetch(url, {
+        headers: { authorization: `Bearer ${config.activity.token}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`;
+        try {
+          const body: any = await response.json();
+          if (body?.error) detail = body.error;
+        } catch {}
+        throw new Error(`第 ${index + 1} 个文件取不回来：${detail}`);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (!bytes.length || bytes.length > 128 * 1024 * 1024) throw new Error("文件为空或超过 128 MiB");
+      try {
+        uploaded.push(await hub.upload(name, mediaType, bytes));
+      } catch (error) {
+        log(`文件 ${item.attachment_id} 上传中台失败：${error}`);
+        throw new Error(`第 ${index + 1} 个文件没有交到中台：${(error as Error).message}`);
+      }
+      continue;
+    }
+    if (typeof item.image_id !== "string") throw new Error(`第 ${index + 1} 个附件缺少编号`);
+    if (!/^img_[0-9a-f]{8}$|^[0-9a-f]{64}$/.test(item.image_id)) throw new Error("图片编号格式不正确");
+    const url = new URL(`${activityHttpBase(config)}/activities/attachments/${encodeURIComponent(item.image_id)}`);
+    url.searchParams.set("name", config.activity.name ?? "autoloop");
+    url.searchParams.set("ticket", item.ticket);
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${config.activity.token}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const body: any = await response.json();
+        if (body?.error) detail = body.error;
+      } catch {}
+      throw new Error(`第 ${index + 1} 张图片取不回来：${detail}`);
+    }
+    const mediaType = (response.headers.get("content-type") ?? "").split(";")[0].trim();
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(mediaType)) throw new Error("主程序返回的不是支持的图片类型");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.length || bytes.length > 128 * 1024 * 1024) throw new Error("图片为空或超过 128 MiB");
+    const extension = mediaType === "image/jpeg" ? "jpg" : mediaType.slice(6);
+    const ordinal = typeof item.image_index === "number" ? item.image_index : index;
+    const name = `screenshot-${index + 1}-${ordinal}.${extension}`;
+    try {
+      uploaded.push(await hub.upload(name, mediaType, bytes));
+    } catch (error) {
+      log(`图片 ${item.image_id} 上传中台失败：${error}`);
+      throw new Error(`第 ${index + 1} 张图片没有交到中台：${(error as Error).message}`);
+    }
+  }
+  return uploaded;
+}
 
 /** The request handling, separated from the socket so tests can run it without a real InSoulForge. */
 export function createService(config: Config, hub: Hub, log = (_line: string) => {}) {
@@ -373,8 +487,10 @@ export function createService(config: Config, hub: Hub, log = (_line: string) =>
         return fail(String((error as Error).message));
       }
       if (!targetMatchesSession(target, context)) return fail("目标会话与本轮来源会话不一致");
-      const project = input.project;
-      if (typeof project !== "string" || !current.projects[project]) return fail("project 不在允许的项目里");
+      const project = input.project ?? input.project_hint;
+      if (project !== undefined && (typeof project !== "string" || !current.projects[project])) {
+        return fail("project_hint 不在允许的项目里");
+      }
       if (typeof input.text !== "string" || !input.text.trim()) return fail("text 不能为空");
       if ([...input.text].length > MAX_TEXT) return fail(`text 最多 ${MAX_TEXT} 字`);
       let sender: string;
@@ -384,12 +500,18 @@ export function createService(config: Config, hub: Hub, log = (_line: string) =>
         return fail(String((error as Error).message));
       }
       if (!permittedSender(sender, target, current)) return fail("这个发送人没有派任务权限");
-      const event = eventOf(target, project, input.text, sender);
+      let attachments: EventAttachment[] = [];
+      try {
+        attachments = await downloadAttachments(current, hub, context, log);
+      } catch (error) {
+        return fail(`附件没有交上：${(error as Error).message}`);
+      }
+      const event = eventOf(target, project, input.text, sender, undefined, attachments);
       try {
         const ack: any = await hub.submit(event as unknown as Record<string, unknown>);
         const routed: string[] = Array.isArray(ack?.routed) ? ack.routed : [];
         let outcome: any = null;
-        if (Number.isInteger(ack?.event) && routed.length) {
+        if (Number.isInteger(ack?.event) && (routed.length || ack?.pending)) {
           try {
             outcome = await hub.outcome(ack.event);
           } catch (error) {
@@ -398,21 +520,28 @@ export function createService(config: Config, hub: Hub, log = (_line: string) =>
         }
         const run = Array.isArray(outcome?.runs) && outcome.runs.length === 1 ? outcome.runs[0] : null;
         const summary = event.summary;
+        const pending = ack?.pending === true || (!project && routed.length === 0 && ack?.event);
         const accepted = routed.length > 0;
-        const label = project === "general" ? "通用任务" : `项目：${project}`;
-        const text = accepted
-          ? `已派单给 Agent Autoloop（${label}${run ? `，任务 #${run.run}` : ""}）。任务：${summary}`
-          : `已提交给 Agent Autoloop，但没有规则接单（${label}）。任务：${summary}`;
-        log(`提交 ${event.id}：${target}/${project}，${routed.join("、") || "没有规则"}`);
+        const label = project === "general" ? "通用任务" : project ? `项目：${project}` : "项目：待判断";
+        const text = pending
+          ? `已提交给 Agent Autoloop，正在判断属于哪个项目。任务：${summary}`
+          : accepted
+            ? `已派单给 Agent Autoloop（${label}${run ? `，任务 #${run.run}` : ""}）。任务：${summary}`
+            : `已提交给 Agent Autoloop，但没有规则接单（${label}）。任务：${summary}`;
+        log(
+          `提交 ${event.id}：${target}/${project ?? "待判断"}，${routed.join("、") || (pending ? "待调度" : "没有规则")}`,
+        );
         return {
           success: true,
           result: {
             submitted: true,
             id: event.id,
-            project,
+            ...(project && { project }),
             target_session: target,
             routed,
             paused: ack?.paused ?? [],
+            pending,
+            ...(ack?.dispatch && { dispatch: ack.dispatch }),
             ...(run && { run: run.run, run_state: run.state }),
             summary,
             accepted,
@@ -537,8 +666,27 @@ export function hubClient(config: Config): Hub {
     if (!response.ok) throw new Error(`中台返回 ${response.status}${data?.error ? `：${data.error}` : ""}`);
     return data;
   }
+  async function upload(name: string, mediaType: string, bytes: Uint8Array) {
+    const form = new FormData();
+    form.set("name", name);
+    form.set("file", new Blob([Buffer.from(bytes)], { type: mediaType }), name);
+    const response = await fetch(`${config.hub.url}/v1/attachments`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.hub.sourceKey}` },
+      body: form,
+      signal: AbortSignal.timeout(30_000),
+    });
+    const text = await response.text();
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {}
+    if (!response.ok) throw new Error(`中台返回 ${response.status}${data?.error ? `：${data.error}` : ""}`);
+    return data as EventAttachment;
+  }
   return {
     submit: (event) => call("/v1/events", config.hub.sourceKey, event),
+    upload,
     outcome: (event) => call(`/v1/events/${event}`, config.hub.sourceKey),
     state: () => call("/v1/state", config.hub.ownerKey),
     answer: (card, body) => call(`/v1/cards/${card}/answer`, config.hub.ownerKey, body),

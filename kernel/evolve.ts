@@ -8,6 +8,10 @@ export const TABLES = [
   "cards",
   "deliveries",
   "decisions",
+  "dispatch_decisions",
+  "dispatch_corrections",
+  "dispatch_preferences",
+  "project_creations",
   "mandates",
   "timers",
   "schedules",
@@ -21,7 +25,17 @@ export type Table = (typeof TABLES)[number];
 export type Change = { table: Table; key: string; row: Row | null };
 export type Fact = { version: 1; seq: number; at: number; type: string; changes: Change[]; meta?: Row };
 export type Match = Record<string, SQLInputValue | SQLInputValue[] | { not: null }>;
-const NUMBERED = new Set<Table>(["events", "runs", "cards", "timers", "decisions"]);
+const NUMBERED = new Set<Table>([
+  "events",
+  "runs",
+  "cards",
+  "timers",
+  "decisions",
+  "dispatch_decisions",
+  "dispatch_corrections",
+  "dispatch_preferences",
+  "project_creations",
+]);
 const indexes: Partial<Record<Table, string[][]>> = {
   events: [["source", "key"], ["matched", "id"], ["routed", "id"], ["paused", "id"], ["id"]],
   runs: [["state", "id"], ["rule", "lane", "state", "id"], ["id"], ["finished_at"]],
@@ -43,6 +57,10 @@ const indexes: Partial<Record<Table, string[][]>> = {
   ],
   deliveries: [["channel"], ["card_id"]],
   decisions: [["event_id"], ["state"], ["source"]],
+  dispatch_decisions: [["event_id"], ["dispatch_run"], ["project"], ["outcome"]],
+  dispatch_corrections: [["event_id"], ["suggested"], ["chosen"]],
+  dispatch_preferences: [["project", "source", "actor"]],
+  project_creations: [["event_id"], ["project"], ["state"]],
   mandates: [["event_id"], ["rule"], ["granted_at"]],
   due: [["at"]],
 };

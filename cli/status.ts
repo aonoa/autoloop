@@ -167,6 +167,7 @@ export function render(state: any, { color, columns }: { color: boolean; columns
       count("等你", state.cards.length, yellow),
       count("在跑", totals.running, cyan),
       count("排队", totals.queued - totals.retrying, yellow),
+      totals.dispatching ? count("待调度", totals.dispatching, yellow) : "",
       totals.retrying ? count("等重派", totals.retrying, yellow) : "",
       totals.unknown ? count("不确定", totals.unknown, red) : "",
       `今天做完 ${totals.doneToday}`,
@@ -193,6 +194,13 @@ export function render(state: any, { color, columns }: { color: boolean; columns
   }
 
   const sourceName = (id: string) => state.sources.find((one: any) => one.id === id)?.name ?? id;
+  const dispatching = state.dispatching ?? [];
+  if (dispatching.length) section(heading("待调度"));
+  for (const event of dispatching) {
+    const words = `${sourceName(event.source)} ${event.type} ${event.subject}`;
+    const state = event.state === "running" ? "调度中" : "排队等调度";
+    say(`  ${yellow(words)}${event.summary ? dim(`：${event.summary}`) : ""}  ${dim(state)}`);
+  }
   const paused = state.lines.filter((line: any) => line.paused);
   if (paused.length) section(`${heading("暂停中")}${dim("（恢复：agent-autoloop resume <规则>）")}`);
   for (const line of paused) {

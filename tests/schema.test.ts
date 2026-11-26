@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { checkSchema } from "../protocol/schema.ts";
-import { parseEvent, parseResult } from "../protocol/validate.ts";
+import { parseEvent, parseProgress, parseResult } from "../protocol/validate.ts";
 
 test("notice receipts accept an optional boolean fyi and keep all other boundaries", () => {
   const notice = { title: "已设好", text: "每天九点检查", key: "daily-check" };
@@ -74,6 +74,78 @@ test("wire schemas agree with event and receipt boundaries", () => {
   }
 });
 
+test("events carry bounded attachment references without trusting names or bytes", () => {
+  const attachment = {
+    id: "att_0123456789abcdef",
+    name: "screenshot.png",
+    mediaType: "image/png",
+    size: 1024,
+  };
+  const event = { id: "shot", type: "qq.task", attachments: [attachment] };
+  assert.deepEqual(parseEvent(event).attachments, [attachment]);
+  assert.deepEqual(checkSchema("event", event), []);
+  for (const bad of [
+    { ...attachment, id: "../etc/passwd" },
+    { ...attachment, id: "att_" },
+    { ...attachment, name: "../screenshot.png" },
+    { ...attachment, name: "shot.exe" },
+    { ...attachment, mediaType: "text/html" },
+    { ...attachment, size: 0 },
+    { ...attachment, size: 128 * 1024 * 1024 + 1 },
+    { ...attachment, unknown: true },
+  ]) {
+    const input = { ...event, attachments: [bad] };
+    assert.throws(() => parseEvent(input));
+    assert.ok(checkSchema("event", input).length, JSON.stringify(bad));
+  }
+  const tooMany = { ...event, attachments: Array(9).fill(attachment) };
+  assert.throws(() => parseEvent(tooMany));
+  assert.ok(checkSchema("event", tooMany).length);
+});
+
+test("documents are first-class attachments but keep the same name and type agreement", () => {
+  const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  for (const item of [
+    { name: "指标.pdf", mediaType: "application/pdf" },
+    { name: "表格.xlsx", mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    { name: "汇报.pptx", mediaType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+    { name: "报告.docx", mediaType: docx },
+    { name: "打包.zip", mediaType: "application/zip" },
+    { name: "说明.md", mediaType: "text/markdown" },
+    { name: "指标.csv", mediaType: "text/csv" },
+    { name: "数据.json", mediaType: "application/json" },
+    { name: "app.log", mediaType: "text/plain" },
+  ]) {
+    const input = { id: "doc", type: "qq.task", attachments: [{ id: "att_0123456789abcdef", size: 9, ...item }] };
+    assert.deepEqual(parseEvent(input).attachments, input.attachments);
+    assert.deepEqual(checkSchema("event", input), []);
+  }
+  const rejected = [
+    { name: "报告.doc", mediaType: docx },
+    { name: "report.docx", mediaType: "text/plain" },
+    { name: "run.sh", mediaType: "text/plain" },
+    { name: "page.html", mediaType: "text/plain" },
+    { name: "app.exe", mediaType: "application/zip" },
+    { name: "x.pdf", mediaType: "application/octet-stream" },
+  ];
+  for (const bad of rejected) {
+    const input = { id: "doc", type: "qq.task", attachments: [{ id: "att_0123456789abcdef", size: 9, ...bad }] };
+    assert.throws(() => parseEvent(input), JSON.stringify(bad));
+  }
+  // The wire schema bounds each field on its own; only the validator knows which names pair with which types.
+  const pairedOnly = rejected[1];
+  const pairedInput = {
+    id: "doc",
+    type: "qq.task",
+    attachments: [{ id: "att_0123456789abcdef", size: 9, ...pairedOnly }],
+  };
+  assert.deepEqual(checkSchema("event", pairedInput), []);
+  for (const bad of rejected.filter((item) => item !== pairedOnly)) {
+    const input = { id: "doc", type: "qq.task", attachments: [{ id: "att_0123456789abcdef", size: 9, ...bad }] };
+    assert.ok(checkSchema("event", input).length, JSON.stringify(bad));
+  }
+});
+
 test("schema checks reject inherited names and incomplete tasks or question cards", () => {
   assert.ok(checkSchema("event", { id: "x", type: "one", constructor: "unexpected" }).length);
   assert.ok(checkSchema("job", { run: 1, token: "t", rule: {}, agent: {}, context: {} }).length);
@@ -101,6 +173,24 @@ test("usage must be an object of finite nonnegative amounts", () => {
   }
 });
 
+test("progress is a bounded step, never an unknown field or an invented time", () => {
+  const step = { step: "执行命令：npm test", detail: "先跑测试", kind: "command" };
+  assert.deepEqual(checkSchema("progress", step), []);
+  assert.deepEqual(parseProgress(step), step);
+  assert.deepEqual(checkSchema("progress", { ...step, at: "2026-11-07T02:00:00+08:00" }), []);
+  for (const bad of [
+    { step: " " },
+    { step: "x".repeat(501) },
+    { step: "x", detail: "y".repeat(4001) },
+    { step: "x", kind: "k".repeat(41) },
+    { step: "x", at: "2026-11-07 02:00:00" },
+    { step: "x", command: "rm -rf /" },
+  ]) {
+    assert.throws(() => parseProgress(bad), JSON.stringify(bad).slice(0, 80));
+    assert.ok(checkSchema("progress", bad).length);
+  }
+});
+
 test("the published schema carries dispatch rounds and routes", () => {
   const job = {
     run: 1,
@@ -120,6 +210,8 @@ test("the published schema carries dispatch rounds and routes", () => {
       decided: [],
       dispatch: {
         minConfidence: 0.7,
+        create: true,
+        workers: ["w1"],
         projects: [
           {
             project: "mini",
@@ -130,6 +222,9 @@ test("the published schema carries dispatch rounds and routes", () => {
             online: true,
             subjects: ["#mini*"],
             aliases: [],
+            description: "迷你项目",
+            canContinue: false,
+            preferences: [],
           },
         ],
         matters: [{ project: "mini", rule: "QQ 任务 mini", lane: "", stage: "idle", lastRun: 2 }],
@@ -143,6 +238,20 @@ test("the published schema carries dispatch rounds and routes", () => {
   assert.ok(
     checkSchema("result", { outcome: "done", route: { project: "mini", session: "later", confidence: 2 } }).length,
   );
+  const create = {
+    outcome: "done",
+    create: { project: "shop", description: "商城", confidence: 0.9, cwd: "/srv/shop" },
+  };
+  assert.deepEqual(checkSchema("result", create), []);
+  assert.deepEqual(parseResult(create), create);
+  for (const bad of [
+    { ...create, create: { project: "shop", description: "商城" } },
+    { ...create, create: { project: "shop", description: "商城", confidence: 2 } },
+    { ...create, create: { project: "shop", description: "商城", confidence: 0.9, unknown: true } },
+  ]) {
+    assert.throws(() => parseResult(bad));
+    assert.ok(checkSchema("result", bad).length);
+  }
 });
 
 test("timer timestamps are real calendar dates in the documented ISO format", () => {

@@ -37,7 +37,25 @@ export function hubClient(url: string, key: string) {
     },
     started: (run: number, token: string, body: { session?: string; link?: string }) =>
       call("POST", `/v1/runs/${run}/started`, { token, body }),
+    progress: (run: number, token: string, body: { step: string; detail?: string; kind?: string; at?: string }) =>
+      call("POST", `/v1/runs/${run}/progress`, { token, body }),
     result: (run: number, token: string, body: unknown) => call("POST", `/v1/runs/${run}/result`, { token, body }),
+    /** Download one attachment for a claimed run. The run token proves which round may read it. */
+    async attachment(run: number, token: string, id: string) {
+      const response = await fetch(`${base}/v1/runs/${run}/attachments/${encodeURIComponent(id)}`, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        let message = `中台返回 ${response.status}`;
+        try {
+          const data = await response.json();
+          if (data?.error) message = data.error;
+        } catch {}
+        throw new HubError(response.status, message);
+      }
+      return response;
+    },
     // The channel's door.
     nextCard: (wait: number) => call("GET", `/v1/cards/next?wait=${wait}`, { timeout: wait + 30 }),
     delivered: (card: number, version: number, ref: string | null) =>
@@ -55,6 +73,10 @@ export function hubClient(url: string, key: string) {
     state: (before?: number) => call("GET", before === undefined ? "/v1/state" : `/v1/state?before=${before}`),
     cancel: (run: number) => call("POST", `/v1/runs/${run}/cancel`, { body: {} }),
     resolve: (card: number, reason: string) => call("POST", `/v1/cards/${card}/resolve`, { body: { reason } }),
+    // Projects: the hub validates and writes rules.json together with the Activity list it is configured with.
+    projects: () => call("GET", "/v1/projects"),
+    addProject: (body: unknown) => call("POST", "/v1/projects", { body }),
+    removeProject: (project: string) => call("DELETE", `/v1/projects/${encodeURIComponent(project)}`),
     // Rule control: facts in the log, rules.json stays as the owner wrote it.
     pause: (rule: string, body: { reason?: string; until?: string } = {}) =>
       call("POST", `/v1/rules/${encodeURIComponent(rule)}/pause`, { body }),
