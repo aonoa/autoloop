@@ -1,0 +1,13 @@
+{
+  "name": "agent-autoloop-insoulforge",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning main.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

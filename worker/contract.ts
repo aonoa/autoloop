@@ -180,6 +180,7 @@ export const repairPrompt = (problem: string) =>
 type Message = {
   outcome: "done" | "nothing" | "failed";
   summary?: string;
+  detail?: string;
   error?: string;
   receipt?: Record<string, unknown>;
   problem?: string;
@@ -196,7 +197,8 @@ function fit(text: string, limit: number) {
 export function readMessage(said: string): Message {
   const blocks = [...said.matchAll(BLOCK)];
   const lines = said.replace(BLOCK, "").split("\n");
-  const firstLine = lines.map((line) => line.trim()).find(Boolean) ?? "";
+  const firstIndex = lines.findIndex((line) => line.trim() !== "");
+  const firstLine = firstIndex === -1 ? "" : lines[firstIndex].trim();
   const first = firstLine
     .replace(/^[#>*\s]+/, "")
     .replace(/\*\*/g, "")
@@ -205,7 +207,10 @@ export function readMessage(said: string): Message {
   const rest = (word: string) => first.slice(word.length).replace(/^[\s:：]+/, "");
   const failed = FAILED.find((word) => first.startsWith(word));
   const nothing = NOTHING.find((word) => first.startsWith(word));
-  let message: Message = { outcome: "done", summary: first };
+  // The lines under the conclusion are the answer itself; keeping only the first line left people with a headline and no report.
+  const body = firstIndex === -1 ? "" : lines.slice(firstIndex + 1).join("\n").trim();
+  const detail = body ? body.replace(/\n{3,}/g, "\n\n") : undefined;
+  let message: Message = { outcome: "done", summary: first, ...(detail && { detail }) };
   if (failed) message = { outcome: "failed", error: rest(failed) || "没说原因" };
   else if (nothing) message = { outcome: "nothing", summary: rest(nothing) };
   const block = blocks.at(-1)?.[1];
@@ -254,6 +259,7 @@ export function resultFrom(
   const base: Result = {
     outcome: message.outcome,
     ...(message.summary !== undefined && { summary: fit(message.summary, 500) }),
+    ...(message.detail !== undefined && { detail: fit(message.detail, 8000) }),
     ...(message.error !== undefined && { error: fit(message.error, 500) }),
     ...(extra.session && { session: extra.session }),
     ...(extra.usage && { usage: extra.usage }),

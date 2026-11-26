@@ -34,6 +34,9 @@ const isSomeWords: Check = (value) => isWords(value) && (value as string[]).leng
 const isId: Check = (value) => typeof value === "string" && ID.test(value);
 const isCount: Check = (value) => Number.isInteger(value) && (value as number) > 0;
 const isTypes: Check = (value) => isSomeWords(value) && (value as string[]).every((type) => TYPE_PATTERN.test(type));
+const SUBJECT_PATTERN = /^[A-Za-z0-9#._:/@-]{1,300}\*?$/;
+const isSubjects: Check = (value) =>
+  isSomeWords(value) && (value as string[]).every((subject) => SUBJECT_PATTERN.test(subject));
 const isCron: Check = (value) => typeof value === "string" && parseCron(value) !== null;
 // One word, as a client may name a session after the first word of its first message. It leads the prompt, which goes to
 // the Agent's command line as an argument: started with a subject from outside it could be read as an option or command.
@@ -101,6 +104,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     checkFields(issues, `${where}的 when `, when, [
       ["source", isKeyOf(rules.sources), `不是已登记的来源：${when.source}`],
       ["types", isTypes, "要是事件类型的列表，可以用 x.* 或 *"],
+      ["subjects", isSubjects, "要是 subject 的列表，可以用前缀加 *", true],
     ]);
   } else if (isObject(when)) {
     if (isCron(when.cron) && nextRun(parseCron(when.cron as string)!, now, rules.timezone) === null) {

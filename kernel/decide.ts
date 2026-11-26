@@ -20,7 +20,17 @@ import {
   workerOf,
   workers,
 } from "./query.ts";
-import { admit, cronOf, eventRule, ruleOf, SCHEDULE, typeMatches, type Rule, type Rules } from "./rules.ts";
+import {
+  admit,
+  cronOf,
+  eventRule,
+  ruleOf,
+  SCHEDULE,
+  subjectMatches,
+  typeMatches,
+  type Rule,
+  type Rules,
+} from "./rules.ts";
 import { stageOf } from "./stage.ts";
 import {
   addUsage,
@@ -55,6 +65,7 @@ const DEFAULTS: Partial<Record<Table, Row>> = {
     attempts: 0,
     ...nulls("claim", "issued", "last_issued", "last_result", "last_answer", "cancel_at", "resume", "session", "link"),
     ...nulls("claimed_at", "seen_at", "finished_at", "summary", "error", "usage"),
+    detail: null,
   },
   cards: {
     ...CARD_BASICS,
@@ -121,6 +132,13 @@ function assignQueued(draft: Draft, run: Row) {
 }
 const threadOf = (run: Row) => ({ rule: run.rule, lane: run.lane, grp: run.grp });
 
+/** A notice about a run belongs where its events came from, so a private chat's failure goes back to that person rather
+ * than to whatever conversation the channel is configured to use by default. */
+function noticeTarget(draft: Draft, run: Row) {
+  const reply = replyOf(draft.view, run.id);
+  return { ...threadOf(run), ...(reply && { reply }) };
+}
+
 /** The session a round about to start goes on in. With resume, one that has none takes its thread's last, unless that round was
  * stopped: what stopped it, or the owner's reason, would meet this one too. Rounds on a thread can share a session, so another
  * still going, or one the hub lost track of, may be running in it: a second process mustn't open it, and a new one starts. */
@@ -159,6 +177,19 @@ const closeStopped = (draft: Draft, run: number, result: string) =>
 
 const closeOffline = (draft: Draft, worker: string) =>
   closeOpen(draft, (key) => key.startsWith(`worker:${worker}:offline:`), "连上了");
+
+/** The conversation a run's events came from, when all of them agree on one. It is data from the source, never a target
+ * chosen by the Agent. */
+function replyOf(view: View, runId: number) {
+  const replies = [
+    ...new Set(
+      takenEventsOf(view, runId)
+        .map((event) => event.reply)
+        .filter(Boolean),
+    ),
+  ];
+  return replies.length === 1 ? String(replies[0]) : undefined;
+}
 
 /** Whether a new stamp would tell nothing this one doesn't. One in the future means a clock was set back: it gets redone. */
 function justSeen({ now }: Draft, row?: Row) {
@@ -243,6 +274,8 @@ function recordEvent(
     link: event.link ?? "",
     hops: event.hops ?? 0,
     actor: event.actor ?? "",
+    // `parseEvent` may drop a field whose value is empty; `ingest` passes the parsed event, which carries a validated reply.
+    ...(event.reply && { reply: event.reply }),
     // What the rules matched. `routed` is what was actually dispatched, and is filled in as work is queued.
     matched: JSON.stringify(matched),
     routed: "[]",
@@ -267,7 +300,10 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false, orig
   }
   const tooDeep = event.hops > MAX_HOPS;
   const takes = (rule: Rule) =>
-    eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, event.type);
+    eventRule(rule) &&
+    rule.when.source === source &&
+    typeMatches(rule.when.types, event.type) &&
+    subjectMatches(rule.when.subjects, event.subject);
   const matched = tooDeep ? [] : draft.rules.rules.filter(takes);
   // A paused rule doesn't take the event, and nothing is kept back for it: the event is recorded as skipped for it.
   const isPaused = (rule: Rule) => !!pauseOf(draft.view, rule, draft.now);
@@ -548,10 +584,21 @@ function cardFromReceipt(draft: Draft, run: Row, kind: string, card: Row) {
   const fyi = kind === "notice" && card.fyi === true;
   const quiet = kind === "notice" && ruleNamed(draft, run.rule)?.tell === "never";
   const origin = { source: sourceOf(draft.view, run.id), agent: run.agent, session, run: run.id };
+  const reply = replyOf(draft.view, run.id);
   const key = `thread:${run.rule}:${run.lane}:${name}`;
   // Closed as it's made, nothing open stops it coming again: a run trying again says it once.
   if (fyi && rows(draft.view, "cards", { key, run_id: run.id }, 1).length) return;
-  createCard(draft, { ...card, hops: hopsOf(draft, run), key, kind, fyi, quiet, ...threadOf(run), ...origin });
+  createCard(draft, {
+    ...card,
+    hops: hopsOf(draft, run),
+    key,
+    kind,
+    fyi,
+    quiet,
+    ...threadOf(run),
+    ...origin,
+    ...(reply && { reply }),
+  });
 }
 
 /** Notices what has gone quiet: a worker that stopped coming, a run its worker stopped mentioning. */
@@ -567,7 +614,7 @@ function sweep(draft: Draft) {
         put(draft, "runs", run.id, { state: "unknown" });
         const agent = configuration(draft.view, run.rules_version).agents[run.agent].name;
         const words = `交给 ${agent} 后超过 5 分钟没有回音，不确定做没做完；后续新任务照常处理。`;
-        notify(draft, `run:${run.id}:unknown`, run.rule, words, threadOf(run));
+        notify(draft, `run:${run.id}:unknown`, run.rule, words, noticeTarget(draft, run));
       }
     }
     const waiting = waitingOn(draft.view, worker, now);
@@ -631,7 +678,7 @@ function claimNext(draft: Draft, worker: string, claim: string) {
 function stopRun(draft: Draft, run: Row, why: string, summary: string, words: string) {
   put(draft, "runs", run.id, { state: "cancelled", finished_at: draft.at, summary });
   closeStopped(draft, run.id, summary);
-  notify(draft, `run:${run.id}:${why}`, run.rule, words, threadOf(run));
+  notify(draft, `run:${run.id}:${why}`, run.rule, words, noticeTarget(draft, run));
   if (run.kind === "assess")
     markAssessmentUnavailable(draft, run, why === "rule-gone" ? "rule_gone" : "assessment_stopped");
 }
@@ -689,11 +736,14 @@ function retryLater(draft: Draft, run: Row, result: Result) {
     set(draft, "runs", other.id, null);
     if (other.resume) put(draft, "runs", id, { resume: other.resume });
   }
-  if (!result.notice?.some((notice) => !notice.fyi) && attempts === 3) {
+  if (!result.notice?.some((notice) => !notice.fyi)) {
     const clock = { timeZone: draft.rules.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" } as const;
     const time = new Intl.DateTimeFormat("zh-CN", clock).format(notBefore);
-    const words = `连续 3 次自动处理没跑完（卡在：${error}），${time} 会自动再试。`;
-    notify(draft, `run:${id}:failing`, run.rule, words, threadOf(run));
+    const words =
+      attempts === 1
+        ? `这一轮没跑完（卡在：${error}），${time} 会自动再试。`
+        : `连续 ${attempts} 次自动处理没跑完（卡在：${error}），${time} 会自动再试。`;
+    notify(draft, `run:${id}:failing`, run.rule, words, noticeTarget(draft, run));
   }
   if (!run.kind) assignQueued(draft, draft.view.get("runs", id)!);
   return rejected;
@@ -713,6 +763,7 @@ function scheduleReview(draft: Draft, run: Row, later: Later) {
     session,
     agent: run.agent,
     hops: hopsOf(draft, run),
+    ...(replyOf(draft.view, run.id) && { reply: replyOf(draft.view, run.id) }),
   };
   if (existing) return void put(draft, "timers", existing.id, fields);
   const source = sourceOf(draft.view, run.id) ?? SCHEDULE;
@@ -812,11 +863,13 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   const { id } = run;
   const rule = ruleNamed(draft, run.rule);
   const summary = result.summary ?? "";
+  const detail = result.detail ?? "";
   const rejected: Rejected[] = [];
   put(draft, "runs", id, {
     state: result.outcome,
     finished_at: draft.at,
     summary,
+    detail,
     error: null,
     cancel_at: null,
     ...(result.report && { report: JSON.stringify(result.report) }),
@@ -835,8 +888,17 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   for (const ask of result.ask ?? []) cardFromReceipt(draft, run, "ask", ask);
   for (const notice of result.notice ?? []) cardFromReceipt(draft, run, "notice", notice);
   if (rule?.tell === "always" && result.outcome === "done") {
-    const once = { fyi: true, once: true, ...threadOf(run), source: sourceOf(draft.view, id), run: id };
-    notify(draft, `run:${id}:done`, run.rule, summary, once);
+    const reply = replyOf(draft.view, id);
+    const once = {
+      fyi: true,
+      once: true,
+      ...threadOf(run),
+      source: sourceOf(draft.view, id),
+      run: id,
+      ...(reply && { reply }),
+    };
+    // The card is what a channel relays, so it carries the whole report and not just the opening line.
+    notify(draft, `run:${id}:done`, run.rule, [summary, detail].filter(Boolean).join("\n\n"), once);
   }
   for (const later of result.later ?? []) scheduleReview(draft, run, later);
   const emitted: number[] = [];
@@ -915,7 +977,14 @@ function answer(draft: Draft, id: number, given: Row) {
   if (given.choice === undefined ? !text : !inRange) throw new InputError("没有这个选项");
   const rule = card.rule ? ruleNamed(draft, card.rule) : undefined;
   const { lane: subject, title: summary, hops = 0 } = card;
-  const event = { id: `card:${id}`, type: "card.answered", subject, summary, hops };
+  const event = {
+    id: `card:${id}`,
+    type: "card.answered",
+    subject,
+    summary,
+    hops,
+    ...(card.reply && { reply: card.reply }),
+  };
   const eventId = recordEvent(draft, card.source ?? SCHEDULE, event, rule ? [rule.name] : []);
   const decision = { choice: given.choice ?? null, answer: text, by: given.by ?? null, decided_at: draft.at };
   put(draft, "cards", id, { state: "decided", ...decision, answer_event: eventId, version: card.version + 1 });
@@ -987,7 +1056,13 @@ function tick(draft: Draft) {
   const due = rows(draft.view, "timers", { event_id: null }).filter((timer) => Date.parse(timer.at) <= now);
   for (const timer of due.sort((a, b) => a.at.localeCompare(b.at))) {
     const rule = ruleNamed(draft, timer.rule);
-    const event = { id: `timer:${timer.id}`, type: "timer.due", subject: timer.lane, hops: timer.hops ?? 0 };
+    const event = {
+      id: `timer:${timer.id}`,
+      type: "timer.due",
+      subject: timer.lane,
+      hops: timer.hops ?? 0,
+      ...(timer.reply && { reply: timer.reply }),
+    };
     const eventId = recordEvent(draft, timer.source, event, rule ? [rule.name] : []);
     put(draft, "timers", timer.id, { event_id: eventId });
     if (rule) {

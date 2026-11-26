@@ -135,6 +135,7 @@ Each recipe includes sample rules and setup instructions (written in Chinese).
 |---|---|
 | [Morning brief](examples/recipes/morning-brief/README.md) | Summarize local notes and Git commits at 8 AM by default; write `briefs/YYYY-MM-DD.md` |
 | [GitHub issues](examples/recipes/github-issues/README.md) | Poll every five minutes, edit code locally, and notify you to review; no commits, pushes, or issue replies |
+| [Multiple GitHub repositories](examples/recipes/github-multi-repo/README.md) | Split sources and rules by repository so an event reaches its own repository before dispatch, not after an agent reads it |
 | [Production alerts](examples/recipes/ops-alerts/README.md) | Receive an error, investigate local code, ask before restarting, and continue after your answer |
 | [User feedback](examples/recipes/feedback/README.md) | Re-read current feedback, fix, deliver and verify, then prepare a reply; ask you in Feishu and resume after your answer |
 | [Website watch](examples/recipes/website-watch/README.md) | Check status and expected content every five minutes; wake the agent on a new incident, keep ongoing failures quiet, and update the card on recovery |
@@ -154,7 +155,7 @@ Built-in plugins ship with the program and are enabled through configuration. Us
 
 | Side | Built in | Setup |
 |---|---|---|
-| **Events**: how work is found | [GitHub Webhook](plugins/github/source.ts), [GitLab Webhook](plugins/gitlab/source.ts), [HTTP API](docs/protocol.md#来源把世界变成事件), [cron rules](skills/agent-autoloop/SKILL.md#改规则), [issue polling script](examples/watch-github-issues.sh) | [Guide](skills/agent-autoloop/SKILL.md#接一个事件插件) |
+| **Events**: how work is found | [GitHub Webhook](plugins/github/source.ts), [GitLab Webhook](plugins/gitlab/source.ts), [QQ private and group tasks](plugins/qq-source/source.ts), [HTTP API](docs/protocol.md#来源把世界变成事件), [cron rules](skills/agent-autoloop/SKILL.md#改规则), [issue polling script](examples/watch-github-issues.sh) | [Guide](skills/agent-autoloop/SKILL.md#接一个事件插件) |
 | **Agents**: who does the work | [Claude Code](plugins/claude/agent.ts), [Codex](plugins/codex/agent.ts), [ACP](plugins/acp/agent.ts), [DeepSeek Harness](plugins/dsh/agent.ts), [ZCode](plugins/zcode/agent.ts), [generic command](plugins/command/agent.ts) | [Guide](skills/agent-autoloop/SKILL.md#接一个-agent) |
 | **Channels**: how cards reach you | [Desktop notifications](plugins/desktop/channel.ts) (on by default), [Feishu](plugins/feishu/channel.ts), [QQ Bot](plugins/qq/channel.ts), [QQ via NapCat](plugins/napcat/channel.ts), [DingTalk / WeCom / Slack / Discord](plugins/webhook/templates.ts) | [Guide](skills/agent-autoloop/SKILL.md#接一个通道) |
 | **Delivery**: CI/CD as a plugin | [`delivery`](plugins/delivery/delivery.ts) | [Guide](skills/agent-autoloop/SKILL.md#交付流水线) |
@@ -238,6 +239,16 @@ For automated workloads, providers generally recommend using API keys rather tha
 ## Documentation
 
 - [Installation guide](INSTALL.md)
+- [Documentation index](docs/README.md) (in Chinese)
+- [Architecture](docs/architecture.md) (in Chinese)
+- [Design and governance model](docs/design.md) (in Chinese)
+- [Usage guide](docs/usage.md) (in Chinese)
+- [Configuration reference](docs/configuration.md) (in Chinese)
+- [HTTP API quick reference](docs/api.md) (in Chinese)
+- [Operations manual](docs/operations.md) (in Chinese)
+- [Implementation map](docs/implementation.md) (in Chinese)
+- [Development guide](docs/development.md) (in Chinese)
+- [Security model](docs/security-model.md) (in Chinese)
 - [Configuration & delivery pipeline manual](skills/agent-autoloop/SKILL.md)
 - [Writing plugins](docs/plugins.md)
 - [Full HTTP protocol specification](docs/protocol.md)

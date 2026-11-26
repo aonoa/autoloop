@@ -70,7 +70,7 @@ test("what doesn't decide what's stored can change without a rebuild", () => {
     ["kernel/decide.ts", "const MAX_ATTEMPTS = 10;", "const MAX_ATTEMPTS = 11;"],
     [
       "host/state.ts",
-      'finished_at manual summary error usage report"',
+      'finished_at manual summary detail error usage report"',
       'finished_at manual summary error usage report extra"',
     ],
   ] as const) {
@@ -121,7 +121,7 @@ test("a change to the read-only views shows at the next start, with no rebuild",
   writeFileSync(
     path,
     original.replace(
-      'finished_at manual summary error usage report"',
+      'finished_at manual summary detail error usage report"',
       'finished_at manual summary error usage report rules_version"',
     ),
   );

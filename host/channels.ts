@@ -18,6 +18,11 @@ export type Card = {
   result: string | null;
   link: string | null;
   rule?: string;
+  /** The matter this card belongs to, when the rule splits work by subject; a chat can show which project is asking. */
+  lane?: string;
+  /** A source conversation the card belongs to, e.g. `qq-private-10001` or `qq-group-20002`; a channel decides whether it
+   * can reach it. */
+  reply?: string;
 };
 export type ChannelContext = {
   hub: Pick<Hub, "nextCard" | "delivered" | "failed" | "answer">;

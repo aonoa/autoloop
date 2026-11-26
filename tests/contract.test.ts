@@ -144,7 +144,11 @@ test("a block needing the owner is handed off without restarting completed work"
 });
 
 test("the first line says how it ended", () => {
-  assert.deepEqual(readMessage("修好了首页的数字\n\n细节在 PR 里。"), { outcome: "done", summary: "修好了首页的数字" });
+  assert.deepEqual(readMessage("修好了首页的数字\n\n细节在 PR 里。"), {
+    outcome: "done",
+    summary: "修好了首页的数字",
+    detail: "细节在 PR 里。",
+  });
   assert.deepEqual(readMessage("\n\n  **修好了**  \n"), { outcome: "done", summary: "修好了" });
   assert.deepEqual(readMessage("没跑成：连不上数据库。"), { outcome: "failed", error: "连不上数据库。" });
   assert.deepEqual(readMessage("**没跑成**：连不上数据库"), { outcome: "failed", error: "连不上数据库" });
@@ -153,6 +157,25 @@ test("the first line says how it ended", () => {
   assert.deepEqual(readMessage("FAILED: no network"), { outcome: "failed", error: "no network" });
   assert.deepEqual(readMessage("NOTHING: all quiet"), { outcome: "nothing", summary: "all quiet" });
   assert.deepEqual(readMessage(""), { outcome: "failed", error: "没留下结果" });
+});
+
+test("what the agent said after its first line reaches the hub instead of failing the receipt check", () => {
+  const said = [
+    "已列出当前 4 个项目（只读核对，未改动）。",
+    "",
+    "1. general — 节点 vantablack。",
+    "2. sub2api — 节点 vantablack。",
+  ].join("\n");
+  const message = readMessage(said);
+  assert.equal(message.summary, "已列出当前 4 个项目（只读核对，未改动）。");
+  assert.match(message.detail!, /2\. sub2api/);
+  const { problem } = resultFrom(message, {});
+  assert.equal(problem, undefined, "a report under the first line is a result the hub takes");
+  assert.equal(
+    readMessage("做完了\n```agent-autoloop\n{}\n```").detail,
+    undefined,
+    "the receipt is not part of what is said to the person",
+  );
 });
 
 test("a receipt-shaped json block without the trusted marker is repaired, not silently ignored or executed", () => {
@@ -183,6 +206,7 @@ test("the receipt is the last code block of its kind, wherever it sits", () => {
   assert.deepEqual(readMessage(body), {
     outcome: "done",
     summary: "做完了",
+    detail: "```js\nconsole.log(1)\n```",
     receipt: { notice: [{ title: "看一眼", text: "这个" }] },
   });
   const twice =

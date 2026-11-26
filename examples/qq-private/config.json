@@ -1,0 +1,31 @@
+{
+  "url": "http://127.0.0.1:3350",
+  "hub": {
+    "listen": "127.0.0.1:3350"
+  },
+  "channels": {
+    "qq-source": {
+      "use": "qq-source",
+      "key": "REPLACE_WITH_CHANNEL_KEY",
+      "url": "http://127.0.0.1:3350",
+      "ws": "ws://127.0.0.1:3001",
+      "token": "REPLACE_WITH_ONEBOT_TOKEN",
+      "sourceKey": "REPLACE_WITH_SOURCE_KEY",
+      "allowed": ["YOUR_QQ_NUMBER"],
+      "groups": ["YOUR_GROUP_NUMBER"],
+      "bot": "BOT_QQ_NUMBER"
+    },
+    "napcat": {
+      "key": "REPLACE_WITH_NAPCAT_CHANNEL_KEY",
+      "url": "http://127.0.0.1:3001",
+      "ws": "ws://127.0.0.1:3001",
+      "token": "REPLACE_WITH_ONEBOT_TOKEN",
+      "user": "YOUR_QQ_NUMBER"
+    }
+  },
+  "worker": {
+    "name": "this-machine",
+    "key": "REPLACE_WITH_WORKER_KEY"
+  },
+  "owner": "REPLACE_WITH_OWNER_KEY"
+}

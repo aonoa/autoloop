@@ -42,6 +42,11 @@ test("wire schemas agree with event and receipt boundaries", () => {
     { id: "one", type: "app.changed", source: "other" },
     { id: 7, type: "invalid" },
     { id: "one", type: "bad type" },
+    { id: "one", type: "app.changed", reply: "qq-private-10001" },
+    { id: "one", type: "app.changed", reply: "qq-group-20002" },
+    { id: "one", type: "app.changed", reply: "qq-group-not-a-number" },
+    { id: "one", type: "app.changed", reply: "qq-private-not-a-number" },
+    { id: "one", type: "app.changed", reply: "https://evil.test" },
   ]) {
     let accepted = true;
     try {

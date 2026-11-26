@@ -107,3 +107,31 @@ test("a person's answer leaves a decision but is not fanned out as material for 
     "a private answer stays with the matter it answers",
   );
 });
+
+test("subject filters keep two project rules on the same source from both taking one event", () => {
+  const shop = {
+    name: "商店任务",
+    when: { source: "app", types: ["feedback.new"], subjects: ["#shop*"] },
+    to: "a1",
+    cwd: "~/shop",
+    prompt: "处理商店。",
+  };
+  const site = {
+    name: "官网任务",
+    when: { source: "app", types: ["feedback.new"], subjects: ["#site*"] },
+    to: "a1",
+    cwd: "~/site",
+    prompt: "处理官网。",
+  };
+  const h = hub({ rules: [...base.rules, shop, site] });
+  const shopAck = h.send({ subject: "#shop/checkout" });
+  const siteAck = h.send({ id: "e2", subject: "#site/landing" });
+  assert.deepEqual(shopAck.routed, ["意见", "商店任务"]);
+  assert.deepEqual(siteAck.routed, ["意见", "官网任务"]);
+  const links = (event: number) =>
+    rows(h.view(), "run_events", { event_id: event })
+      .map((link) => rows(h.view(), "runs", { id: link.run_id })[0]?.rule)
+      .sort();
+  assert.deepEqual(links(shopAck.event), ["商店任务", "意见"]);
+  assert.deepEqual(links(siteAck.event), ["官网任务", "意见"]);
+});

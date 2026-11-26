@@ -38,7 +38,12 @@ export type Agent = AgentOptions & { name: string; worker: string; use: string; 
 export type ChannelStyle = "im" | "async";
 export type Channel = { name: string; answerers?: string[]; links?: boolean; style?: ChannelStyle };
 export type Tell = "always" | "needed" | "never";
-type EventFilter = { source: string; types: string[] };
+type EventFilter = {
+  source: string;
+  types: string[];
+  /** Optional lane prefixes. A rule that names them only takes events whose subject matches one; absent means any. */
+  subjects?: string[];
+};
 type When = EventFilter | { cron: string };
 type RuleWords = { skill?: string; prompt?: string };
 /** A session's name for clients that take it from the first line: {subject} and {id} filled in by the worker. */
@@ -97,6 +102,12 @@ function typeMatch(pattern: string, type: string) {
   return pattern === "*" || pattern === type || (pattern.endsWith(".*") && type.startsWith(pattern.slice(0, -1)));
 }
 export const typeMatches = (patterns: string[], type: string) => patterns.some((pattern) => typeMatch(pattern, type));
+/** A subject pattern is an exact lane, or a prefix ending in `*`; `/qq-group-1/shop*` covers a lane's answers too. */
+function subjectMatch(pattern: string, subject: string) {
+  return pattern.endsWith("*") ? subject.startsWith(pattern.slice(0, -1)) : subject === pattern;
+}
+export const subjectMatches = (patterns: string[] | undefined, subject: string) =>
+  !patterns?.length || patterns.some((pattern) => subjectMatch(pattern, subject));
 export const eventRule = (rule: Rule): rule is Rule & { when: EventFilter } => "source" in rule.when;
 export const cronOf = (rule: Rule) => (rule.when as { cron: string }).cron;
 

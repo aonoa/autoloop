@@ -9,6 +9,8 @@ export const ANSWER_BY = 500;
 export const ANSWER_REF = 500;
 /** A channel's own reference to the message it sent. */
 export const DELIVERY_REF = 500;
+/** What a run may say under its one-line conclusion. A card still holds less; the hub keeps the whole report here. */
+export const RESULT_DETAIL = 8000;
 export type Later = { key: string; at?: string; about?: string; cancel?: boolean };
 export type Ask = { title: string; text: string; options: string[]; recommend?: number; about?: string; key?: string };
 export type Notice = { title: string; text: string; key?: string; fyi?: boolean };
@@ -35,6 +37,8 @@ export type Verdict = {
 export type Result = {
   outcome: "done" | "nothing" | "failed" | "cancelled";
   summary?: string;
+  /** What the Agent said under its conclusion: the report itself, shown to the person. */
+  detail?: string;
   error?: string;
   session?: string;
   usage?: Usage;
@@ -58,10 +62,13 @@ export type EventInput = {
   hops: number;
   /** Who caused it, in the source's own identity: a login name, a chat member id, or empty when the source has none. */
   actor: string;
+  /** Where a reply belongs when the source names a conversation: `qq-private-<number>` or `qq-group-<number>`, never
+   * free text. */
+  reply?: string;
 };
 
-const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500, actor: 200 } as const;
-const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor"];
+const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500, actor: 200, reply: 100 } as const;
+const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor", "reply"];
 
 export function parseEvent(input: unknown): EventInput {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -87,6 +94,7 @@ export function parseEvent(input: unknown): EventInput {
     link: field("link"),
     hops: hops as number,
     actor: field("actor"),
+    ...(given.reply !== undefined && { reply: field("reply") }),
   };
   // Half a Unicode character is stored and looked up as different bytes, so the same id would never be recognised again.
   if (!event.id.isWellFormed()) throw new InputError("id 里有不完整的字符");
@@ -99,6 +107,9 @@ export function parseEvent(input: unknown): EventInput {
   }
   // An actor names who caused it, so it is held to the same shape as a subject: an identity, never prose.
   if (!/^[A-Za-z0-9#._:\/@-]*$/.test(event.actor)) throw new InputError("actor 只能用字母、数字和 # . _ : / @ -");
+  if (event.reply !== undefined && !/^qq-(private|group)-[1-9][0-9]*$/.test(event.reply)) {
+    throw new InputError("reply 只能是 qq-private-<QQ 号> 或 qq-group-<群号>");
+  }
   return event;
 }
 
@@ -200,6 +211,7 @@ export function parseResult(input: unknown): Result {
     !only(result, [
       "outcome",
       "summary",
+      "detail",
       "error",
       "session",
       "usage",
@@ -220,6 +232,7 @@ export function parseResult(input: unknown): Result {
   if (!optional(result.summary, 500) || !optional(result.error, 500) || !optional(result.session, 500)) {
     throw new InputError("summary、error、session 最多 500 字");
   }
+  if (!optional(result.detail, RESULT_DETAIL)) throw new InputError(`detail 最多 ${RESULT_DETAIL} 字`);
   if (!validUsage(result.usage)) throw new InputError("usage 要是对象，里面要是有限的非负数字");
   if (!listOf(result.ask, 5, validAsk)) {
     throw new InputError("ask 每一项要有 title、text 和 2 到 5 个 options，recommend 是其中一个的序号，最多 5 项");

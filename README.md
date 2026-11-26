@@ -133,6 +133,7 @@ Agent 结束了这一轮，问了你一个问题。它现在不占进程、不�
 |---|---|
 | [每日早报](examples/recipes/morning-brief/README.md) | 默认每天 8 点整理本地笔记和 Git 提交，写入 `briefs/YYYY-MM-DD.md` |
 | [跟进 GitHub Issue](examples/recipes/github-issues/README.md) | 每 5 分钟查新 Issue，在本地改代码并通知你查看；不提交、不推送、不回复 Issue |
+| [多个 GitHub 仓库共用一个中台](examples/recipes/github-multi-repo/README.md) | 按仓库拆分来源和规则，事件在派工前就进入对应仓库，不会先被别的仓库接走 |
 | [线上告警排查](examples/recipes/ops-alerts/README.md) | 接收报错、对照代码查原因，需要重启时发卡片询问，回答后继续 |
 | [用户反馈处理](examples/recipes/feedback/README.md) | 重读反馈当前状态、修复、交付核实、准备回复；需要决定时飞书问你，回答后继续 |
 | [网站巡检](examples/recipes/website-watch/README.md) | 每 5 分钟检查状态和关键内容，首次异常交给 Agent，持续异常不重复通知，恢复后更新原卡片 |
@@ -152,7 +153,7 @@ Agent 结束了这一轮，问了你一个问题。它现在不占进程、不�
 
 | 方向 | 内置 | 配置 |
 |---|---|---|
-| **事件**：怎么发现新活 | [GitHub Webhook](plugins/github/source.ts)、[GitLab Webhook](plugins/gitlab/source.ts)、[HTTP 接口](docs/protocol.md#来源把世界变成事件)、[定时规则](skills/agent-autoloop/SKILL.md#改规则)、[Issue 轮询脚本](examples/watch-github-issues.sh) | [说明](skills/agent-autoloop/SKILL.md#接一个事件插件) |
+| **事件**：怎么发现新活 | [GitHub Webhook](plugins/github/source.ts)、[GitLab Webhook](plugins/gitlab/source.ts)、[QQ 私聊 / 群任务](plugins/qq-source/source.ts)、[HTTP 接口](docs/protocol.md#来源把世界变成事件)、[定时规则](skills/agent-autoloop/SKILL.md#改规则)、[Issue 轮询脚本](examples/watch-github-issues.sh) | [说明](skills/agent-autoloop/SKILL.md#接一个事件插件) |
 | **Agent**：谁来干活 | [Claude Code](plugins/claude/agent.ts)、[Codex](plugins/codex/agent.ts)、[ACP](plugins/acp/agent.ts)、[DeepSeek Harness](plugins/dsh/agent.ts)、[ZCode](plugins/zcode/agent.ts)、[通用命令](plugins/command/agent.ts) | [说明](skills/agent-autoloop/SKILL.md#接一个-agent) |
 | **通道**：去哪找你拍板 | [桌面通知](plugins/desktop/channel.ts)（默认开启）、[飞书](plugins/feishu/channel.ts)、[QQ 机器人](plugins/qq/channel.ts)、[QQ（NapCat）](plugins/napcat/channel.ts)、[钉钉 / 企微 / Slack / Discord](plugins/webhook/templates.ts) | [说明](skills/agent-autoloop/SKILL.md#接一个通道) |
 | **交付**：把 CI/CD 也做成插件 | [`delivery`](plugins/delivery/delivery.ts) | [说明](skills/agent-autoloop/SKILL.md#交付流水线) |
@@ -235,10 +236,20 @@ Apple M5 Pro、24 GB、Node 24.21.0。写入逐条提交，事务落盘后才应
 
 ## 更多文档
 
+- [文档总览](docs/README.md)：按目标选择阅读路径
+- [架构文档](docs/architecture.md)：组件边界、事件流、部署形态
+- [设计文档](docs/design.md)：设计原则、Policy/Mandate/Decision/Eval、事项阶段
+- [配置手册](docs/configuration.md)：`config.json`、`rules.json`、`secrets.env` 完整字段
+- [使用指南](docs/usage.md)：日常操作、回答、暂停恢复、排查
+- [API 速查](docs/api.md)：HTTP 端点、鉴权、常用请求
+- [如何编写插件](docs/plugins.md)：三类插件契约、交付方向与模板
+- [运维手册](docs/operations.md)：后台服务、备份恢复、升级、多机部署
+- [开发指南](docs/development.md)：目录、内核边界、测试、CI、发布
+- [安全模型](docs/security-model.md)：信任边界、密钥、权限限制
+- [完整通信协议](docs/protocol.md)
+- [状态与转换](docs/state-machines.md)
 - [安装说明](INSTALL.md)
 - [规则与交付流水线配置手册](skills/agent-autoloop/SKILL.md)
-- [如何编写插件](docs/plugins.md)
-- [完整通信协议](docs/protocol.md)
 - [安全边界说明](SECURITY.md)
 - [参与贡献与交流](CONTRIBUTING.md)
 - [项目开发约定](AGENTS.md)
@@ -253,7 +264,7 @@ Apple M5 Pro、24 GB、Node 24.21.0。写入逐条提交，事务落盘后才应
 | `protocol/` | 通信格式、JSON Schema、输入校验、HTTP 客户端和一致性检查 |
 | `worker/` | 接单程序：领活、运行 Agent、心跳与停止、读取和提交回执 |
 | `cli/`、`bin/` | 用户命令及启动入口，包括状态、回答、`why`、MCP、更新与卸载 |
-| `plugins/` | 内置 Agent、事件、通道和交付插件 |
+| `plugins/` | 内置 Agent、事件、通道插件，以及复用 Agent 契约的交付实现 |
 | `examples/recipes/` | 完整场景：规则、任务 Skill 和启用说明 |
 | `examples/plugins/`、`examples/skills/`、`examples/*.sh` | 最小插件模板、独立任务手册和 Shell 示例 |
 | `skills/agent-autoloop/` | 中台的正式配置与操作手册，安装时也提供给 Agent 使用 |

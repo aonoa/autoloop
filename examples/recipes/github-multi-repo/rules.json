@@ -1,0 +1,53 @@
+{
+  "timezone": "Asia/Shanghai",
+  "sources": {
+    "github-app": {
+      "name": "GitHub app",
+      "adapter": "github"
+    },
+    "github-web": {
+      "name": "GitHub web",
+      "adapter": "github"
+    }
+  },
+  "agents": {
+    "app-agent": {
+      "name": "App Agent",
+      "worker": "my-computer",
+      "use": "codex",
+      "access": "read"
+    },
+    "web-agent": {
+      "name": "Web Agent",
+      "worker": "my-computer",
+      "use": "codex",
+      "access": "read"
+    }
+  },
+  "rules": [
+    {
+      "name": "app issue",
+      "when": {
+        "source": "github-app",
+        "types": ["issues.opened", "issue_comment.created"]
+      },
+      "to": "app-agent",
+      "cwd": "~/code/app",
+      "project": "app",
+      "prompt": "只处理 owner/app 仓库的 issue 和评论。先读资料核实仓库和编号；不是 owner/app 时写“没事可做：不是本仓库”。只读代码，不提交、不推送、不回复 issue。需要人决定时按回执提问。",
+      "parallel": 2
+    },
+    {
+      "name": "web issue",
+      "when": {
+        "source": "github-web",
+        "types": ["issues.opened", "issue_comment.created"]
+      },
+      "to": "web-agent",
+      "cwd": "~/code/web",
+      "project": "web",
+      "prompt": "只处理 owner/web 仓库的 issue 和评论。先读资料核实仓库和编号；不是 owner/web 时写“没事可做：不是本仓库”。只读代码，不提交、不推送、不回复 issue。需要人决定时按回执提问。",
+      "parallel": 2
+    }
+  ]
+}
