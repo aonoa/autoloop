@@ -107,11 +107,11 @@
 
 `policy` 不写，或写 `"accept": "off"`，就与原来的 autoloop 完全一样：来源密钥验证通过、规则命中，就派活。`accept` 缺省也是 `off`；只写 `policy.fanout` 只开启扇出，不会开启 gate。开启后只收窄，不扩大：
 
-| `policy.accept` | 行为 |
-| --- | --- |
-| `off`（默认） | 来源密钥即授权，规则命中即派活 |
-| `gate` | 先过确定性检查：来源策略里的 `allowlist`、`admission`、`bots`；通过才写授权并派活 |
-| `assess` | 过 gate 后再排一轮研判，由 `policy.assessor` 指定的 Agent 判断这件事该不该接；`accept` 才派活 |
+| `policy.accept` | 行为                                                                                          |
+| --------------- | --------------------------------------------------------------------------------------------- |
+| `off`（默认）   | 来源密钥即授权，规则命中即派活                                                                |
+| `gate`          | 先过确定性检查：来源策略里的 `allowlist`、`admission`、`bots`；通过才写授权并派活             |
+| `assess`        | 过 gate 后再排一轮研判，由 `policy.assessor` 指定的 Agent 判断这件事该不该接；`accept` 才派活 |
 
 来源可以有自己的策略，身份只在本来源内比较，不同来源的账号不做映射：
 
@@ -167,13 +167,45 @@ POST /v1/events                    Authorization: Bearer <来源的密钥>
 - 没有规则匹配的事件也留着，`agent-autoloop status` 看得到。
 - 字段上限：`id` 200 个字、`subject` 100、`summary` 200、`detail` 4000、`link` 500，`type` 64 个字符。
 
-配置 `policy.dispatch` 后，没有匹配、也没有被 Policy 拒绝的外部事件会先排一轮 `kind: "dispatch"` 的只读调度轮。调度 Agent 只提交 `route`，由中台重新校验项目、来源、发送人、节点和置信度后，再走与普通事件相同的派发路径。未配置时行为不变：事件只记录，不自动放置。协议细节见[配置手册](configuration.md#调度-agentpolicydispatch)和[设计文档](design.md#dispatch调度-agent)。
+### 附件：截图和文件原样交给 Agent
+
+任务文字有时解释不了一张报错截图或一份表格。来源可以先把文件传给中台，再在事件里引用它：
+
+```
+POST /v1/attachments                Authorization: Bearer <来源的密钥>
+multipart/form-data: name=screenshot.png, file=<bytes>
+→ 200 { "id": "att_0123456789abcdef", "name": "screenshot.png", "mediaType": "image/png", "size": 18432 }
+
+POST /v1/events
+{ "id": "chat:2", "type": "qq.task", "subject": "qq-private-10001", "summary": "按钮错位",
+  "attachments": [ { "id": "att_0123456789abcdef", "name": "screenshot.png", "mediaType": "image/png", "size": 18432 } ] }
+```
+
+- 收图片（PNG、JPEG、WebP、GIF）和文档（PDF、ZIP、DOCX、XLSX、PPTX、TXT/LOG、Markdown、CSV、JSON）；单个最多 128 MiB，一条事件最多 8 个；文件名不能带路径分隔符或控制字符。
+- 中台按文件头和内容核对 `mediaType`，文本类还要求后缀与内容一致；事件只能引用同一来源上传、名字/类型/大小都一致且仍存在的附件。老来源和老事件不带 `attachments` 时行为不变。
+- 中台只把附件元数据和随机 `id` 记进事件；字节放在数据目录的 `attachments/`，内核不读文件。
+- 来源读回自己的原图：`GET /v1/attachments/<id>`，同样用来源密钥；别的来源看不到。`GET /v1/runs/<编号>/attachments/<id>` 用这一轮的 token，且这一轮的上下文事件必须引用该附件；轮次结束后不能再读。
+- 接单程序领到带附件的一轮后，先把文件下载到 `<run>/attachments/<name>`，再把绝对路径写进提示词。下载失败时这一轮明确失败，不会在没有原始材料的情况下启动 Agent。
+
+配置 `policy.dispatch` 后，没有匹配、也没有被 Policy 拒绝的**任务**外部事件会先排一轮 `kind: "dispatch"` 的只读调度轮。调度 Agent 提交 `route`，由中台重新校验项目、来源、发送人、节点和置信度后，再走与普通事件相同的派发路径；不是任务的聊天可以提交带 `"fyi": true` 的 `notice`，直接回到原会话，不启动项目轮次。未配置时行为不变：事件只记录，不自动放置。协议细节见[配置手册](configuration.md#调度-agentpolicydispatch)和[设计文档](design.md#dispatch调度-agent)。
+
+
+外部来源不必知道项目的规则、目录或节点。它只提交任务事实；需要判断项目时，事件应答带 `pending: true` 和 `dispatch`：
+
+```
+POST /v1/events
+{ "id": "chat:1", "type": "qq.task", "subject": "qq-private-10001", "summary": "查一下天气", "actor": "10001", "reply": "qq-private-10001" }
+→ 200 { "event": 35, "duplicate": false, "routed": [], "pending": true,
+        "dispatch": { "state": "queued", "run": 12 } }
+```
+
+`dispatch.state` 依次是 `queued`、`running`，可能经过 `creating`，最后是 `placed`、`replied`、`unassigned` 或 `failed`；`pending` 在 queued/running/creating 时为 true。等待调度或等待新建项目配置的事件不算“没有规则接”，`/v1/state` 的 `unrouted` 不列它，另在 `dispatching` 和 `totals.dispatching` 里显示。
 
 来源想知道发出去的事件后来怎么样了，用同一把密钥按应答里的 `event` 编号查，隔一段时间查一下还没结束的就行：
 
 ```
 GET /v1/events/34                  Authorization: Bearer <来源的密钥>
-→ 200 { "event": 34, "routed": ["处理意见"], "paused": [], "runs": [
+→ 200 { "event": 34, "routed": ["处理意见"], "paused": [], "dispatch": { "state": "placed", "run": 12, "project": "mini" }, "runs": [
     { "run": 41, "rule": "处理意见", "state": "done", "attempts": 0, "error": null,
       "finishedAt": "2026-11-07T08:00:00.000Z", "summary": "…", "events": [ { "id": "…", "type": "…", … } ] } ] }
 ```
@@ -222,7 +254,7 @@ POST /v1/tell    { "task": "每周清理", "ask": { "title", "text", "options": 
 
 `kind: "dispatch"` 的轮次读取一个未分配事件，只判断它属于哪个项目。Job 里带 `context.dispatch` 快照：
 
-- `projects`：本来源和事件类型能到达的项目、规则、`cwd`、Agent、节点、在线状态、`subjects`、`aliases`；
+- `projects`：本来源和事件类型能到达的项目、规则、`cwd`、Agent、节点、在线状态、`subjects`、`aliases`、`description`、最近一轮、能否续接会话、上次调度结果和本人纠正偏好；
 - `matters`：当前活跃事项及其阶段；
 - `recentRuns`：最近轮次摘要；
 - `minConfidence`：低于它不执行。
@@ -240,11 +272,14 @@ POST /v1/tell    { "task": "每周清理", "ask": { "title", "text", "options": 
 }
 ```
 
-- `session: "continue"` 接着同项目、同 lane 最近一次成功会话；
+- `session: "continue"` 接着同项目、同 lane 最近一次成功会话；会话还被别的轮占着、没有可续会话或 Agent 变了时，安全地新开；
 - `session: "new"` 开新会话，不并入已有 queued 轮；
 - `session: "ask"` 发项目选择卡，由人决定；
 - 项目不存在、来源/类型不匹配、发送人无权限、节点离线或置信度不足时，不派活，转成未分配卡片；
-- 调度失败或无 `route` 不会无限重试。
+- 开启 `policy.dispatch.create` 后，调度轮可以只提交 `create`，不能同时提交 `route` 或执行类动作。`create` 需要 `project`、`description` 和 0 到 1 的 `confidence`，可带绝对目录、已登记 Agent/节点和 `subjects`；中台校验通过后只记待办，宿主写入配置成功才重新调度；
+- 调度失败或无 `route` 不会无限重试；失败记为 `dispatch_state: "failed"`，并生成未分配卡片；
+- 不是任务时，可以只提交 `notice`，但必须带 `"fyi": true`；中台把第一条直接回到原会话。没有 `fyi` 的 `notice` 不当聊天回复，按未分配处理；
+- 调度轮不接受 `ask`、`resolve`、`later`、`events`，它们不会被执行。
 
 调度轮强制 `access: "read"`，但它不是操作系统级沙箱；`command` 类 Agent 的只读性由程序自身保证。
 
@@ -269,7 +304,8 @@ GET /v1/work?claim=<这次领活的编号>&wait=50&running=7,8&capacity=1    Aut
   "session": null,       // 尽量接着的会话：重派时是上一次的，回答来了是提问那一轮的，规则写了 resume 时是这个事项上一轮的。接不上就开新的，所以它只是优化
   "askFirst": ["删数据", "…"],
   "context": {           // 接单程序把它写成文件交给 Agent，都是资料
-    "events":  [{ "id", "source", "sourceName", "type", "subject", "summary", "detail", "link", "receivedAt" }],
+    "events":  [{ "id", "source", "sourceName", "type", "subject", "summary", "detail", "link", "receivedAt",
+                  "attachments": [{ "id", "name", "mediaType", "size" }] }],
     "answers": [{ "card", "title", "options", "choice", "chosen", "text", "about", "by", "at" }],  // 这一轮要接着做的决定；choice 是从 0 起的下标，chosen 是所选那项的文字，自由文字回答时就是那句回答
     "timers":  [{ "key", "about", "at" }],                                               // 这一轮到期的复查
     "waiting": [{ "key", "about", "at" }],                                               // 这个事项还没到期的复查
@@ -281,15 +317,18 @@ GET /v1/work?claim=<这次领活的编号>&wait=50&running=7,8&capacity=1    Aut
 
 ```
 POST /v1/runs/12/started   Authorization: Bearer <token>   { "session": "…", "link": "claude://…" }
+POST /v1/runs/12/progress  Authorization: Bearer <token>   { "step": "执行命令：npm test", "detail": "…", "kind": "command" }
 POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 → 200 { "rejected": [{ "card": 9, "reason": "不在本轮核对范围" }] }
 ```
+
+进度是一条只用于展示的事实：`step` 必填（1–500 字），`detail`、`kind`、`at` 可选；中台只接受本轮 token 和仍在 `claimed` 的轮次，不因它改变授权、排队或事项阶段。接单程序从 Codex/Claude 已有的流式输出中提取步骤，约每 5 秒最多上报一批，结束前强制冲刷最后一批；状态页和 `why` 读取最近记录，`/v1/state` 每轮最多带 20 条。进度里不要放密钥、完整命令输出或大段日志。
 
 ```jsonc
 // Result
 {
   "outcome": "done" | "nothing" | "failed" | "cancelled",
-  "summary": "一句话", "error": "没跑成的原因", "session": "…",
+  "summary": "一句话", "detail": "第一行以下的原话", "error": "没跑成的原因", "session": "…",
   "usage": { "input": 0, "output": 0, "cached": 0, "cost": 0 },
   // 下面就是回执，一个事务里一次生效
   "ask":     [{ "title", "text", "options": ["…", "…"], "recommend": 0, "about": "留给接着干的自己", "key": "这件事的固定名字" }],
@@ -303,6 +342,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 ```
 
 - 结果可以重放：响应丢了，同一个 token 再交一次同样的内容，得到同样的确认；内容不同返回 409。
+- `detail` 是 Agent 最后一条消息里第一行以下的全部正文（不含回执代码块），最多 8000 字。只写第一行的结论会把报告丢掉：列出四五个项目、贴一段说明、分点讲清楚原因，这些都在这。中台按原样存进这一轮（`why` 能看到完整内容），规则写了 `tell: "always"` 时，完成通知的卡片正文是「结论 + 空行 + 正文」；通道若一条消息放不下，由通道按行拆成几段发完，不截断。
 - `failed` 会重派，所以它只带 `notice`，其余的不生效；本人要停的这一轮交 `failed` 不再重派，`notice` 也不生效。
 - 需要本人恢复连接、登录或身份验证时，用 `done` 结束本轮并交 `ask`，不交 `failed`。`done` 表示本轮结束，未完成的事项由卡片继续跟进，不代表网页已经验收。同一阻塞已有 `open` 卡片时不重复提问，不用 `later` 定时重试；`waiting` 里同一阻塞已有的复查用 `cancel` 取消。保留已完成业务，`about` 写清恢复后只做哪些剩余步骤。
 - `usage` 由接单程序上报本次执行的用量，包含这次执行的回执重写；每一项都可以没有：`input`、`output`、`cached` 是 Token 数，`cost` 是美元。`input` 是全部输入，包括从缓存读的和写进缓存的；`cached` 是其中从缓存读的部分，价格通常只有一小部分，所以单独列出。中台把同一轮各次执行的已报数值相加，重复提交不重复计费；没有上报的字段保持缺省，不当成零。`agent-autoloop status` 按完成时间汇总今天和最近 7 天已结束的轮次，没上报的轮数如实写出来。
@@ -312,6 +352,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 - `resolve` 只能结同来源、同组、这一轮领活前就有的卡片，越界的写进 `rejected`，不影响这一轮的结果。
 - `later` 的 `key` 范围是这个事项，同一个 `key` 再写一次就是改时间。
 - `events` 的来源由规则的 `emits` 决定，回执改不了。
+- `context.events[].attachments` 是这一轮可读的附件元数据；接单程序据此下载本地文件。回执里的 `events` 不能新增任意附件引用，否则来源归属校验会拒绝整条事件。
 - `report` 是这一轮的结构化状态（`progress`/`waiting`/`ready`/`blocked`/`failed`/`dropped`），用来算事项阶段；`verdict` 只由研判轮填写。两者都可以不写。
 - 研判轮不做事，只读事件并交 `verdict`。`accept` 才写决定和授权并排真正的活；`stop`/`ignore`/`unavailable` 只留下决定。研判的 `reason` 与 `scope` 会写进决定；预演交付后补授权时也沿用这两项，不会退回 gate 的第一条决定。研判轮没写 `verdict`、被取消，或连续失败到不再重试，事件记为 `unavailable`，对应规则记为 `refused`，不会永远挂着；同一条事件和规则只留一条 `unavailable`。规则在研判排队时被删掉，也按这一条结算。
 
@@ -321,6 +362,8 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 
 ````
 第一行一句话结论。可自动重试的临时失败写「没跑成：原因」，需要本人恢复的阻塞写「待你处理：原因」并交 ask，没事可做写「没事可做：原因」。其余结束本轮，事项由回执继续跟进。
+
+第一行下面写正文：要人看的实际结果、清单、来源和验证情况都写在这里。第一行只是标题，别把正文也压到那一行里；中台会把正文一并留下并发给人。
 
 ```agent-autoloop
 { "ask": [ … ], "notice": [ … ], "resolve": [ … ], "later": [ … ], "events": [ … ], "report": { … } }
@@ -382,7 +425,7 @@ GET /v1/cards/next?wait=50    Authorization: Bearer <通道的密钥>
 
 ```
 GET  /v1/state              Authorization: Bearer <本人的密钥>
-→ 200 { "seq", "totals", "cards", "recentCards", "agents", "channels", "sources", "lines", "pauses", "skipped", "elsewhere", "runs", "matters", "decisions", "mandates", "nextBefore", "hasMore", "unrouted", "spending", "timers", "now", "timezone" }
+→ 200 { "seq", "totals", "cards", "recentCards", "agents", "channels", "sources", "lines", "pauses", "skipped", "elsewhere", "runs", "matters", "decisions", "dispatchDecisions", "dispatchCorrections", "dispatchPreferences", "projectCreations", "dispatching", "mandates", "nextBefore", "hasMore", "unrouted", "spending", "timers", "now", "timezone" }
 
 POST /v1/cards/56/answer    { "choice": 1 } 或 { "text": "别的想法" }
 POST /v1/cards/56/resolve   { "reason": "不用决定了，因为……" }
@@ -393,15 +436,15 @@ POST /v1/runs/12/cancel     {}
 
 `matters` 是还在办的事项及其阶段，新的在前。已结束、只剩等待报告且没有排队轮次、没有未结卡片、没有未来复查的事项不列出来。阶段按下面的表自上而下先匹配先得：
 
-| 阶段 | 含义 |
-| --- | --- |
-| `person/delivery` | 卡片发送失败，正在重试；输入还没送到人手里 |
-| `person/answer` | 有未回答的提问 |
-| `person/review` | 最近一轮报告 `ready`，等人审阅 |
-| `person/blocked` / `person/failed` | 最近一轮报告受阻/失败，此后本人没有回答或结案 |
-| `working/queued` | 有排队的轮次，或还没开始过 |
-| `working` | 正在执行、结果暂时不明，或最近一轮报告 `progress`（还在做，稍后会再交结果） |
-| `idle` | 这一轮结束了，没有别的在办动作 |
+| 阶段                               | 含义                                                                        |
+| ---------------------------------- | --------------------------------------------------------------------------- |
+| `person/delivery`                  | 卡片发送失败，正在重试；输入还没送到人手里                                  |
+| `person/answer`                    | 有未回答的提问                                                              |
+| `person/review`                    | 最近一轮报告 `ready`，等人审阅                                              |
+| `person/blocked` / `person/failed` | 最近一轮报告受阻/失败，此后本人没有回答或结案                               |
+| `working/queued`                   | 有排队的轮次，或还没开始过                                                  |
+| `working`                          | 正在执行、结果暂时不明，或最近一轮报告 `progress`（还在做，稍后会再交结果） |
+| `idle`                             | 这一轮结束了，没有别的在办动作                                              |
 
 受阻/失败后，定时、复查和自动事件都不会再派新活；本人回答卡片、结案，或手动运行后才会接着走。`decisions` 是最近的决定，`mandates` 是有效授权，都只读；它们是全局最近的记录，不随 `?before=` 翻轮次而清空。
 
@@ -583,7 +626,7 @@ Webhook 通道的 `config.json` 配置使用 `use: "webhook"`、`url` 和 `platf
 
 现成场景与内置插件的入口见 [README](../README.md#拿来即用的场景模板)，开发模板见[写插件](plugins.md)。插件文件名仍使用协议中的 `source.ts`，对应面向用户的“事件插件”。
 
-`npm run benchmark` 打印冷启动、空闲和千连接内存、逐条落盘写入、派活 p99、排队很深时被挡下的心跳 p99 和模拟吞吐，不设达标线。数字在 README，是 Apple M5 Pro 上的本地实测，不代表服务器容量；不通过改变采样时间或主动触发 GC 降低读数。日志只追加，不压缩，磁盘占用仍随历史增长。常驻内存不保存全部历史，待处理工作及返回结果仍会占用内存；统计总量仍需遍历数据库索引。没有总览页、工作流画布、Agent 记忆、模型路由、多租户或插件市场。
+`npm run benchmark` 打印冷启动、空闲和千连接内存、逐条落盘写入、派活 p99、排队很深时被挡下的心跳 p99 和模拟吞吐，不设达标线。数字在 README，是 Apple M5 Pro 上的本地实测，不代表服务器容量；不通过改变采样时间或主动触发 GC 降低读数。日志只追加，磁盘占用仍随历史增长；心跳和通道轮询是其中最大的一块，停中台后用 `agent-autoloop compact` 清掉保留期外的那部分，每个键的最新一条始终留着，状态不变（见[压缩日志](operations.md#压缩日志)）。常驻内存不保存全部历史，待处理工作及返回结果仍会占用内存；统计总量仍需遍历数据库索引。没有总览页、工作流画布、Agent 记忆、模型路由、多租户或插件市场。
 
 ### 历史增长实测
 

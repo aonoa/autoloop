@@ -15,7 +15,7 @@ beforeCleanup.push(() => {
 
 export const ruleNamed = (name: string) => rules.rules.find((rule) => rule.name === name);
 
-type EventAck = { event: number; duplicate: boolean; routed: string[]; paused: string[] };
+type EventAck = { event: number; duplicate: boolean; routed: string[]; paused: string[]; pending?: boolean };
 export const ingest = (source: string, input: unknown, now = Date.now()): EventAck =>
   execute("ingest", [source, input], now);
 export const claimNext = (worker: string, claim: string, now = Date.now()): Job | null =>
@@ -24,6 +24,8 @@ export const heartbeat = (worker: string, running: number[], now = Date.now()) =
   execute("heartbeat", [worker, running], now);
 export const started = (run: number, token: string, input: unknown, now = Date.now()) =>
   execute("started", [run, token, input], now);
+export const progress = (run: number, token: string, input: unknown, now = Date.now()) =>
+  execute("progress", [run, token, input], now);
 type ReceiptAck = { rejected: Rejected[]; duplicate?: boolean };
 export const finish = (run: number, token: string, input: unknown, now = Date.now()): ReceiptAck =>
   execute("finish", [run, token, input], now);

@@ -9,6 +9,8 @@ export const ANSWER_BY = 500;
 export const ANSWER_REF = 500;
 /** A channel's own reference to the message it sent. */
 export const DELIVERY_REF = 500;
+/** What a run may say under its one-line conclusion. A card still holds less; the hub keeps the whole report here. */
+export const RESULT_DETAIL = 8000;
 export type Later = { key: string; at?: string; about?: string; cancel?: boolean };
 export type Ask = { title: string; text: string; options: string[]; recommend?: number; about?: string; key?: string };
 export type Notice = { title: string; text: string; key?: string; fyi?: boolean };
@@ -35,12 +37,15 @@ export type Verdict = {
 export type Result = {
   outcome: "done" | "nothing" | "failed" | "cancelled";
   summary?: string;
+  /** What the Agent said under its conclusion: the report itself, shown to the person. */
+  detail?: string;
   error?: string;
   session?: string;
   usage?: Usage;
   report?: Report;
   verdict?: Verdict;
   route?: Route;
+  create?: Create;
   ask?: Ask[];
   notice?: Notice[];
   resolve?: { card: number; reason: string }[];
@@ -48,12 +53,60 @@ export type Result = {
   events?: EventInput[];
 };
 
+/** A step an agent reports while it is still working. It is progress, never authority: the hub only records it. */
+export type Progress = { at?: string; step: string; detail?: string; kind?: string };
+
+const PROGRESS_STEP = 500;
+const PROGRESS_DETAIL = 4000;
+
+export function parseProgress(input: unknown): Progress {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new InputError("进度要是一个 JSON 对象");
+  }
+  const given = input as Record<string, unknown>;
+  for (const name of Object.keys(given)) {
+    if (!["at", "step", "detail", "kind"].includes(name)) throw new InputError(`不认识的进度字段：${name}`);
+  }
+  const step = given.step;
+  if (typeof step !== "string" || !step.trim() || [...step].length > PROGRESS_STEP) {
+    throw new InputError(`step 要是 1 到 ${PROGRESS_STEP} 个字的文字`);
+  }
+  const detail = given.detail;
+  if (detail !== undefined && (typeof detail !== "string" || [...detail].length > PROGRESS_DETAIL)) {
+    throw new InputError(`detail 最多 ${PROGRESS_DETAIL} 个字`);
+  }
+  const kind = given.kind;
+  if (kind !== undefined && (typeof kind !== "string" || [...kind].length > 40)) {
+    throw new InputError("kind 最多 40 个字");
+  }
+  const at = given.at;
+  if (at !== undefined && (typeof at !== "string" || !dateTime(at))) {
+    throw new InputError("at 要是带时区的时间");
+  }
+  return {
+    step: step.trim(),
+    ...(detail !== undefined && { detail: detail as string }),
+    ...(kind !== undefined && { kind: kind as string }),
+    ...(at !== undefined && { at: at as string }),
+  };
+}
+
 /** A dispatcher's placement of an unplaced event. The hub checks the project, its rule and the sender before using it. */
 export type Route = {
   project: string;
   session: "continue" | "new" | "ask";
   confidence: number;
   reason?: string;
+};
+/** A dispatcher's request for a project that does not exist yet. The hub checks it and the host writes the configuration. */
+export type Create = {
+  project: string;
+  description: string;
+  confidence: number;
+  cwd?: string;
+  agent?: string;
+  worker?: string;
+  subjects?: string[];
 };
 export type Rejected = { card?: number; what?: string; reason: string };
 
@@ -70,10 +123,81 @@ export type EventInput = {
   /** Where a reply belongs when the source names a conversation: `qq-private-<number>` or `qq-group-<number>`, never
    * free text. */
   reply?: string;
+  /** Files the source uploaded first, referenced by their hub-issued ids. Bytes never travel inside the event. */
+  attachments?: EventAttachment[];
 };
 
+/** A file a source uploaded through `/v1/attachments`; `name` is display metadata, never a path. */
+export type EventAttachment = { id: string; name: string; mediaType: string; size: number };
+/** The file types a source may hand to an Agent. Executables and scripts stay out: a task that needs one has to ask. */
+export const ATTACHMENT_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "application/pdf",
+  "application/zip",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "application/json",
+] as const;
+export const MAX_ATTACHMENTS = 8;
+export const MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024;
+const ATTACHMENT_ID = /^att_[0-9a-f]{16}$/;
+const ATTACHMENT_NAME = /^[^/\\\x00-\x1f\x7f]{1,200}$/;
+/** Extensions a name may carry for each declared type; both must agree, so a renamed file cannot slip past the type. */
+export const ATTACHMENT_EXTENSIONS: Record<string, RegExp> = {
+  "image/png": /\.png$/i,
+  "image/jpeg": /\.jpe?g$/i,
+  "image/webp": /\.webp$/i,
+  "image/gif": /\.gif$/i,
+  "application/pdf": /\.pdf$/i,
+  "application/zip": /\.zip$/i,
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": /\.docx$/i,
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": /\.xlsx$/i,
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": /\.pptx$/i,
+  "text/plain": /\.(txt|log)$/i,
+  "text/markdown": /\.(md|markdown)$/i,
+  "text/csv": /\.csv$/i,
+  "application/json": /\.json$/i,
+};
+
+function parseAttachment(input: unknown): EventAttachment {
+  if (typeof input !== "object" || input === null || Array.isArray(input))
+    throw new InputError("附件要是一个 JSON 对象");
+  const given = input as Record<string, unknown>;
+  for (const name of Object.keys(given)) {
+    if (!["id", "name", "mediaType", "size"].includes(name)) throw new InputError(`不认识的附件字段：${name}`);
+  }
+  const id = given.id;
+  const name = given.name;
+  const mediaType = given.mediaType;
+  const size = given.size;
+  if (typeof id !== "string" || !ATTACHMENT_ID.test(id)) throw new InputError("附件 id 不是中台签发的编号");
+  if (typeof mediaType !== "string" || !(ATTACHMENT_TYPES as readonly string[]).includes(mediaType)) {
+    throw new InputError(`附件 mediaType 只能是 ${ATTACHMENT_TYPES.join("、")}`);
+  }
+  if (typeof name !== "string" || !ATTACHMENT_NAME.test(name) || !ATTACHMENT_EXTENSIONS[mediaType].test(name)) {
+    throw new InputError("附件 name 要是安全的文件名，并且后缀与 mediaType 一致");
+  }
+  if (!Number.isSafeInteger(size) || (size as number) < 1 || (size as number) > MAX_ATTACHMENT_BYTES) {
+    throw new InputError(`附件 size 要在 1 到 ${MAX_ATTACHMENT_BYTES} 字节之间`);
+  }
+  return { id, name, mediaType, size: size as number };
+}
+
+function parseAttachments(input: unknown): EventAttachment[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input) || input.length > MAX_ATTACHMENTS) throw new InputError(`附件最多 ${MAX_ATTACHMENTS} 项`);
+  return input.map(parseAttachment);
+}
+
 const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500, actor: 200, reply: 100 } as const;
-const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor", "reply"];
+const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "actor", "reply", "attachments"];
 
 export function parseEvent(input: unknown): EventInput {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -100,6 +224,7 @@ export function parseEvent(input: unknown): EventInput {
     hops: hops as number,
     actor: field("actor"),
     ...(given.reply !== undefined && { reply: field("reply") }),
+    ...(given.attachments !== undefined && { attachments: parseAttachments(given.attachments) }),
   };
   // Half a Unicode character is stored and looked up as different bytes, so the same id would never be recognised again.
   if (!event.id.isWellFormed()) throw new InputError("id 里有不完整的字符");
@@ -183,6 +308,29 @@ const validVerdict = (verdict: unknown): boolean => {
 };
 
 const SESSIONS = ["continue", "new", "ask"];
+const PROJECT_ID = /^[A-Za-z0-9._-]{1,40}$/;
+const validCreate = (create: unknown): boolean => {
+  if (!isItem(create)) return false;
+  const item = create as Item;
+  return (
+    only(item, ["project", "description", "confidence", "cwd", "agent", "worker", "subjects"]) &&
+    typeof item.project === "string" &&
+    PROJECT_ID.test(item.project) &&
+    text(item.description, 1000) &&
+    typeof item.confidence === "number" &&
+    Number.isFinite(item.confidence) &&
+    item.confidence >= 0 &&
+    item.confidence <= 1 &&
+    optional(item.cwd, 300) &&
+    optional(item.agent, 100) &&
+    optional(item.worker, 100) &&
+    (item.subjects === undefined ||
+      (Array.isArray(item.subjects) &&
+        item.subjects.length > 0 &&
+        item.subjects.length <= 100 &&
+        item.subjects.every((subject) => text(subject, 300))))
+  );
+};
 const validRoute = (route: unknown): boolean => {
   if (!isItem(route)) return false;
   const item = route as Item;
@@ -232,6 +380,7 @@ export function parseResult(input: unknown): Result {
     !only(result, [
       "outcome",
       "summary",
+      "detail",
       "error",
       "session",
       "usage",
@@ -243,6 +392,7 @@ export function parseResult(input: unknown): Result {
       "report",
       "verdict",
       "route",
+      "create",
     ])
   ) {
     throw new InputError("结果里有不认识的字段");
@@ -253,6 +403,7 @@ export function parseResult(input: unknown): Result {
   if (!optional(result.summary, 500) || !optional(result.error, 500) || !optional(result.session, 500)) {
     throw new InputError("summary、error、session 最多 500 字");
   }
+  if (!optional(result.detail, RESULT_DETAIL)) throw new InputError(`detail 最多 ${RESULT_DETAIL} 字`);
   if (!validUsage(result.usage)) throw new InputError("usage 要是对象，里面要是有限的非负数字");
   if (!listOf(result.ask, 5, validAsk)) {
     throw new InputError("ask 每一项要有 title、text 和 2 到 5 个 options，recommend 是其中一个的序号，最多 5 项");
@@ -273,6 +424,11 @@ export function parseResult(input: unknown): Result {
   if (result.route !== undefined && !validRoute(result.route)) {
     throw new InputError(
       "route 要有 project、session（continue、new、ask）、0 到 1 的 confidence，reason 最多 1000 字",
+    );
+  }
+  if (result.create !== undefined && !validCreate(result.create)) {
+    throw new InputError(
+      "create 要有 project（字母、数字和 . _ -）、description 和 0 到 1 的 confidence，cwd、agent、worker、subjects 可选且不与其他字段混用",
     );
   }
   if (result.events !== undefined) {

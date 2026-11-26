@@ -59,6 +59,8 @@ test("why prints the real event, rules version, worker, session, receipt, answer
   const job = hub.claimNext("mac-mini", "first", start + 2000)!;
   hub.started(job.run, job.token, { session: "pending", link: "https://example.com/sessions/pending" }, start + 2500);
   hub.started(job.run, job.token, { session: "example", link: "https://example.com/sessions/example" }, start + 3000);
+  hub.execute("progress", [job.run, job.token, { step: "执行命令：npm test" }], start + 3500);
+  hub.execute("progress", [job.run, job.token, { step: "修改文件：src/app.ts", detail: "补上空值检查" }], start + 3600);
   hub.finish(
     job.run,
     job.token,
@@ -84,6 +86,9 @@ test("why prints the real event, rules version, worker, session, receipt, answer
     "规则版本",
     "mac-mini",
     "开始",
+    "进展：执行命令：npm test",
+    "进展：修改文件：src/app.ts",
+    "补上空值检查",
     "结束",
     "https://example.com/sessions/example",
     "等你选择发货方式",

@@ -22,9 +22,20 @@ export type Services = {
   wait(until: number, signal: AbortSignal): Promise<void>;
   stream(after: number, signal: AbortSignal, key: string): ReadableStream;
   adapt(source: string, headers: Headers, body: string): Promise<unknown[]>;
+  /** Owner-only project registration: the hub writes its own rules and optional Activity list. */
+  project(action: "add" | "remove" | "list", input?: unknown): unknown;
+  /** Uploaded event files live outside the fact log, owned by the source key that sent them. */
+  attachments: {
+    save(source: string, name: unknown, mediaType: unknown, bytes: Buffer): unknown;
+    read(source: string, id: string): { bytes: Buffer; mediaType: string; name: string };
+    /** Resolve a file for a run: the run's own event must reference it, and only while that run is in hand. */
+    forRun(run: number, token: string, id: string): { bytes: Buffer; mediaType: string; name: string };
+    ownedBy(source: string, references: unknown): void;
+  };
 };
 
 const MAX_BODY = 1024 * 1024;
+const MAX_ATTACHMENT_BODY = 129 * 1024 * 1024;
 const MAX_WAIT_SECONDS = 50;
 const LINK_LIFETIME = 7 * 86400_000;
 const CARD_LINK = /^\/c\/([A-Za-z0-9_-]{1,64})$/;
@@ -34,10 +45,10 @@ const NO_STORE = { "cache-control": "no-store" };
 
 class TooLarge extends Error {}
 
-async function readText(request: Request) {
-  if (!request.body) return "";
+async function readBytes(request: Request, limit = MAX_BODY) {
+  if (!request.body) return Buffer.alloc(0);
   // A little over the limit is read to its end: hanging up mid-upload can cost the client its 413.
-  if (Number(request.headers.get("content-length")) > 8 * MAX_BODY) throw new TooLarge();
+  if (Number(request.headers.get("content-length")) > 8 * limit) throw new TooLarge();
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -45,11 +56,15 @@ async function readText(request: Request) {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.length;
-    if (size <= MAX_BODY) chunks.push(value);
-    if (size > 8 * MAX_BODY) throw new TooLarge();
+    if (size <= limit) chunks.push(value);
+    if (size > 8 * limit) throw new TooLarge();
   }
-  if (size > MAX_BODY) throw new TooLarge();
-  return Buffer.concat(chunks).toString("utf8");
+  if (size > limit) throw new TooLarge();
+  return Buffer.concat(chunks);
+}
+
+async function readText(request: Request) {
+  return (await readBytes(request)).toString("utf8");
 }
 
 async function readJson(request: Request) {
@@ -76,7 +91,15 @@ function callFrom(services: Services, request: Request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
   const now = services.now();
   const view = services.view();
-  return { services, request, url, token, now, view, rules: configuration(view) };
+  return {
+    services,
+    request,
+    url,
+    token,
+    now,
+    view,
+    rules: configuration(view),
+  };
 }
 type Call = ReturnType<typeof callFrom>;
 
@@ -298,7 +321,43 @@ async function route(call: Call): Promise<Response> {
   const hook = /^\/v1\/in\/([a-z][a-z0-9-]*)$/.exec(path);
   if (method === "POST" && hook) return webhook(call, hook[1]);
   if (method === "POST" && path === "/v1/events") {
-    return json(act(call, "ingest", requireKey(call, "source"), await readJson(request)));
+    const source = requireKey(call, "source");
+    const event = await readJson(request);
+    if (event && typeof event === "object" && !Array.isArray(event)) {
+      services.attachments.ownedBy(source, (event as Record<string, unknown>).attachments);
+    }
+    return json(act(call, "ingest", source, event));
+  }
+  if (method === "POST" && path === "/v1/attachments") {
+    const source = requireKey(call, "source");
+    if (!(request.headers.get("content-type") ?? "").startsWith("multipart/form-data;")) {
+      throw new InputError("附件要用 multipart/form-data 上传");
+    }
+    let form: FormData;
+    try {
+      form = await request.formData();
+    } catch {
+      throw new InputError("附件表单读不懂");
+    }
+    const file = form.get("file");
+    const name = form.get("name");
+    if (!(file instanceof File) || typeof name !== "string") {
+      throw new InputError("附件表单要有 name 和一个 file");
+    }
+    if (file.size > MAX_ATTACHMENT_BODY) throw new TooLarge();
+    return json(services.attachments.save(source, name, file.type, Buffer.from(await file.arrayBuffer())));
+  }
+  const attachment = /^\/v1\/attachments\/(att_[0-9a-f]{16})$/.exec(path);
+  if (method === "GET" && attachment) {
+    const source = requireKey(call, "source");
+    const found = services.attachments.read(source, attachment[1]);
+    return new Response(new Uint8Array(found.bytes), {
+      headers: {
+        "content-type": found.mediaType,
+        "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(found.name)}`,
+        ...NO_STORE,
+      },
+    });
   }
   const sent = /^\/v1\/events\/([1-9][0-9]*)$/.exec(path);
   if (method === "GET" && sent) {
@@ -309,7 +368,7 @@ async function route(call: Call): Promise<Response> {
   }
   if (method === "POST" && path === "/v1/tell") return tell(call);
   if (method === "GET" && path === "/v1/work") return work(call);
-  const [, runPart, action] = /^\/v1\/runs\/([1-9][0-9]*)\/(started|result|cancel|why)$/.exec(path) ?? [];
+  const [, runPart, action] = /^\/v1\/runs\/([1-9][0-9]*)\/(started|progress|result|cancel|why)$/.exec(path) ?? [];
   const runId = Number(runPart);
   if (method === "GET" && action === "why") {
     requireKey(call, "owner");
@@ -320,7 +379,25 @@ async function route(call: Call): Promise<Response> {
     act(call, "started", runId, token, await readJson(request));
     return json({ ok: true });
   }
+  if (method === "POST" && action === "progress") {
+    act(call, "progress", runId, token, await readJson(request));
+    return json({ ok: true });
+  }
   if (method === "POST" && action === "result") return json(act(call, "finish", runId, token, await readJson(request)));
+  const runAttachment = /^\/v1\/runs\/([1-9][0-9]*)\/attachments\/(att_[0-9a-f]{16})$/.exec(path);
+  if (method === "GET" && runAttachment) {
+    // The run token is checked against this round, and its events decide which files the round may read. Only then are
+    // bytes opened, so a token cannot fetch a file some other source or round happened to name.
+    act(call, "runAttachment", Number(runAttachment[1]), token, runAttachment[2]);
+    const found = services.attachments.forRun(Number(runAttachment[1]), token, runAttachment[2]);
+    return new Response(new Uint8Array(found.bytes), {
+      headers: {
+        "content-type": found.mediaType,
+        "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(found.name)}`,
+        ...NO_STORE,
+      },
+    });
+  }
   if (method === "GET" && path === "/v1/cards/next") return nextCard(call);
   const card = /^\/v1\/cards\/([1-9][0-9]*)\/(delivered|failed|answer|resolve)$/.exec(path);
   if (method === "POST" && card) return cardAction(call, Number(card[1]), card[2]);
@@ -328,6 +405,23 @@ async function route(call: Call): Promise<Response> {
   if (method === "POST" && ruleControl) return control(call, ruleControl[1], ruleControl[2]);
   if (method === "GET" && path === "/v1/state") return state(call);
   if (method === "GET" && path === "/v1/stream") return stream(call);
+  if (method === "GET" && path === "/v1/projects") {
+    requireKey(call, "owner");
+    return json(call.services.project("list"));
+  }
+  if (method === "POST" && path === "/v1/projects") {
+    requireKey(call, "owner");
+    const body = await readJson(request);
+    // The HTTP door never chooses a file: it writes the hub's own rules and the Activity list the service is configured with.
+    if (body && typeof body === "object" && "activityConfig" in body)
+      throw new InputError("activityConfig 只能在命令行使用");
+    return json(call.services.project("add", body));
+  }
+  const project = /^\/v1\/projects\/([A-Za-z0-9._-]{1,40})$/.exec(path);
+  if (method === "DELETE" && project) {
+    requireKey(call, "owner");
+    return json(call.services.project("remove", project[1]));
+  }
   return json({ error: "没有这个地址" }, 404);
 }
 

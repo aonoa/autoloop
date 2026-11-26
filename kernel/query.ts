@@ -73,6 +73,20 @@ export function routingOf(event: Row) {
   return { routed, paused, ...(refused.length && { refused }) };
 }
 
+/** How a dispatcher has handled an event so far. A queued or running dispatch is pending, not unrouted. */
+export function dispatchOf(event: Row) {
+  const state = event.dispatch_state as string | undefined;
+  if (!state) return {};
+  return {
+    dispatch: {
+      state,
+      ...(event.dispatch_run !== undefined && event.dispatch_run !== null && { run: event.dispatch_run }),
+      ...(event.dispatch_project && { project: event.dispatch_project }),
+    },
+    ...((state === "queued" || state === "running" || state === "creating") && { pending: true }),
+  };
+}
+
 /**
  * What became of an event, for the source that sent it: every run it is in now, as retries can merge runs. A run's summary
  * and the events its receipt sent are what the Agent made of all its events, so only a run of this source's alone has them.
@@ -88,6 +102,7 @@ export function eventOutcome(view: View, source: string, id: number) {
   return {
     event: event.id,
     ...routingOf(event),
+    ...(dispatchOf(event) as { dispatch?: Row; pending?: boolean }),
     runs: runs.map((run) => {
       const own = sourceOf(view, run.id) === source;
       const sent = (JSON.parse(run.emitted ?? "[]") as number[]).map((id) => view.get("events", id)!);
@@ -201,7 +216,9 @@ export function jobOf(view: View, run: Row, env: Environment, now = Date.parse(r
   // A dispatcher is not a rule's work: it needs a place to read from and a name, but no rule prompt or cwd.
   const { name, cwd, skill, prompt, title, emits } = definition ?? {
     name: run.kind === "dispatch" ? DISPATCH_NAME : run.rule,
-    cwd: "",
+    // A dispatch has no rule and no project folder. It still needs a real, harmless place to start from: the worker
+    // expands `~` and refuses a missing directory, so an empty cwd would fail before the read-only round begins.
+    cwd: "~",
     skill: undefined,
     prompt: undefined,
     title: undefined,
@@ -233,10 +250,24 @@ export function jobOf(view: View, run: Row, env: Environment, now = Date.parse(r
     askFirst: rules.askFirst,
     ...(runThread && { thread: runThread }),
     context: {
-      events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
-        const sourceName = rules.sources[source]?.name ?? source;
-        return { id, source, sourceName, type, subject, summary, detail, link, receivedAt, hops: hops ?? 0 };
-      }),
+      events: events.map(
+        ({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops, attachments }) => {
+          const sourceName = rules.sources[source]?.name ?? source;
+          return {
+            id,
+            source,
+            sourceName,
+            type,
+            subject,
+            summary,
+            detail,
+            link,
+            receivedAt,
+            hops: hops ?? 0,
+            ...(attachments && { attachments }),
+          };
+        },
+      ),
       answers: answers.map(({ id: card, title, options, choice, answer: text, about, by, decided_at: at }) => {
         const picked: string[] = JSON.parse(options);
         return {
@@ -285,6 +316,7 @@ export function unrouted(view: View, limit = 20) {
       (event) => event.matched === undefined && (event.routed ?? "[]") === "[]",
     ),
   ]
+    .filter((event) => !event.dispatch_state)
     .sort((a, b) => b.id - a.id)
     .slice(0, limit);
 }
@@ -302,15 +334,40 @@ export function dispatchSnapshot(view: View, rules: Rules, source: string, type:
     )
     .map((rule) => {
       const agent = rules.agents[rule.to];
+      const [last] = rows(view, "runs", { rule: rule.name, state: ["done", "nothing"] }, 1, true);
+      const [lastChoice] = rows(view, "dispatch_decisions", { project: rule.project, outcome: "placed" }, 1, true);
+      const preferences = rows(view, "dispatch_preferences", { project: rule.project, active: 1 }).map((one) => ({
+        source: one.source ?? "",
+        actor: one.actor ?? "",
+        reason: one.reason ?? "",
+        confirmations: one.confirmations ?? 0,
+      }));
       return {
         project: rule.project!,
         rule: rule.name,
+        description: rule.description ?? "",
         cwd: rule.cwd,
         agent: rule.to,
         worker: agent.worker,
         online: workerOnline(view, agent.worker, now),
         subjects: rule.when.subjects ?? [],
         aliases: rule.aliases ?? [],
+        ...(last && {
+          lastRun: last.id,
+          lastSession: last.session ?? null,
+          lastState: last.state,
+          lastSummary: last.summary ?? null,
+        }),
+        canContinue: !!last?.session,
+        ...(lastChoice && {
+          lastDispatch: {
+            run: lastChoice.dispatch_run,
+            confidence: lastChoice.confidence,
+            reason: lastChoice.reason ?? "",
+            at: lastChoice.created_at,
+          },
+        }),
+        preferences,
       };
     });
   const matters = stagesOf(view, rules, now)
@@ -340,7 +397,14 @@ export function dispatchSnapshot(view: View, rules: Rules, source: string, type:
         at: run.finished_at ?? null,
       };
     });
-  return { minConfidence: rules.policy?.dispatch?.minConfidence ?? 0.7, projects, matters, recentRuns };
+  return {
+    minConfidence: rules.policy?.dispatch?.minConfidence ?? 0.7,
+    create: rules.policy?.dispatch?.create === true,
+    workers: rules.policy?.dispatch?.workers ?? [],
+    projects,
+    matters,
+    recentRuns,
+  };
 }
 
 /** The project a rule belongs to, and the project's rules. */

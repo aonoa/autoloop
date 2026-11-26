@@ -70,6 +70,7 @@ type Reading = {
   error?: string;
   finished?: boolean;
   started?: boolean;
+  progress?: { step: string; detail?: string; kind?: string }[];
 };
 
 type Adapter = {
@@ -111,6 +112,7 @@ type Adapter = {
 - `error` 表示没跑成；
 - `session` 用于续接和链接；
 - `usage` 是本次启动用量；`sessionUsage` 是会话累计值，由 worker 做差。
+- `progress` 是运行中可选的步骤列表，由 worker 节流上报给中台，只用于展示；不要放密钥、完整命令输出或大段日志。
 
 不要因为输出暂时不完整就抛错；无法读取时应返回错误信息而不是让解析崩溃。
 
@@ -304,7 +306,7 @@ QQ ⇄ NapCat ⇄ InSoulForge ⇄ autoloop Activity（收任务）
 
 回投通道只发 Activity 通知，不直接连 NapCat，也不消费 QQ 消息。它默认每 20 秒发一次 `status` 心跳，避免 InSoulForge 按 45 秒无入站帧断开。收消息由 `integrations/insoulforge` 的 `autoloop` Activity 负责。两者不能同时用同一个 Activity 名称。完成和提问通知使用 `force`，由 Router 硬规则触发回复；进度通知使用 `judge`，允许聊天模型判断是否值得打扰。生产上启用 `insoulforge` 回投时，应移除 `napcat` 和 `qq-source` 通道，否则同一条消息可能被两个入口消费；这只是关掉这一台机器的重复入口，不删除对应的直连插件。
 
-经 InSoulForge 的 `projects` 配置应显式保留一个通用 lane（通常叫 `general`），承接天气、资料、新闻、计算等与代码仓库无关的任务。只有代码项目可选时，模型容易被“必须从列表里选一个”逼着猜中第一个项目，把通用问题记到错误的项目上下文里。`general` 规则用独立 `cwd` 和 `subjects`，但不要开 `resume`，避免不同通用问题串会话。
+经 InSoulForge 的 `projects` 是可选的项目提示，不是外部系统必须懂的路由表。明确知道项目时传 `project_hint`；拿不准就省略，由 Autoloop 的调度 Agent 按项目 `description`、别名、最近会话和本人纠正记录判断。天气、资料、新闻、计算等明确与代码仓库无关的任务可以保留一个 `general` lane 承接；没有 `general` 或不想指定时交给调度，不要为了凑一个项目而猜第一个代码项目。`general` 规则用独立 `cwd` 和 `subjects`，但不要开 `resume`，避免不同通用问题串会话。
 
 发送人身份由 InSoulForge 从本轮消息快照提取，并通过活动请求的 `context.sender_id` 单独注入，不放进模型可写的
 `parameters`。Activity 用 `allow.senders` 校验派任务、回答卡片、查看进度和项目清单的真实发送人；私聊和群聊缺少该身份时拒绝，而不是退回到配置里的

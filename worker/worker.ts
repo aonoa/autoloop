@@ -44,6 +44,8 @@ const WAIT = 50;
 const PAUSE = 30_000;
 const UNREACHABLE = 10 * 60_000;
 const TELL_TRIES = 5;
+/** How often progress may reach the hub while a run is going. */
+const PROGRESS_EVERY = 5_000;
 /** Enough of a long output to find what's at either end of it, while it runs. */
 const HEAD = 64 * 1024;
 const TAIL = 1024 * 1024;
@@ -69,8 +71,15 @@ type Entry = {
   stopping?: number;
   why?: "cancel" | "timeout" | "finished";
   result?: Result;
+  /** How many progress steps have already been read from this turn, so the same output isn't read twice. */
+  progressSeen?: number;
+  progressSentAt?: number;
+  /** Steps read but held back by the report interval, to go with the next batch. */
+  progressPending?: { step: string; detail?: string; kind?: string }[];
+  /** Steps already sent, so a re-read of the same output doesn't send them again. */
+  progressSent?: string[];
 };
-export type WorkerHub = Pick<Hub, "work" | "started" | "result">;
+export type WorkerHub = Pick<Hub, "work" | "started" | "progress" | "result" | "attachment">;
 export type WorkerOptions = {
   hub: WorkerHub;
   name: string;
@@ -222,9 +231,15 @@ export function createWorker({
     delete entry.pid;
     delete entry.stopping;
     delete entry.why;
+    // Each turn has its own output file: its steps start again at the beginning.
+    entry.progressSeen = 0;
+    entry.progressPending = [];
+    entry.progressSent = [];
+    delete entry.progressSentAt;
     save(entry);
     const { rule, agent } = entry.job;
-    const cwd = rule.cwd.replace(/^~(?=[/\\])/, homedir());
+    // `~` alone means the home directory too: a read-only control round has no project folder and uses exactly that.
+    const cwd = rule.cwd === "~" ? homedir() : rule.cwd.replace(/^~(?=[/\\])/, homedir());
     const turn: Turn = {
       prompt,
       session: entry.session,
@@ -311,8 +326,31 @@ export function createWorker({
     save(entry);
   }
 
+  /** Local files for this run. Names come from the source, so only their basename is used and collisions are numbered. */
+  async function attachments(entry: Entry, job: Job) {
+    const files: { name: string; path: string }[] = [];
+    const folder = path.join(entry.dir, "attachments");
+    for (const [index, attachment] of job.context.events.flatMap((event) => event.attachments ?? []).entries()) {
+      const name = path.basename(attachment.name);
+      if (!name || name !== attachment.name || name === "." || name === "..") {
+        throw new Error(`附件 ${index + 1} 的文件名不安全`);
+      }
+      mkdirSync(folder, { recursive: true, mode: 0o700 });
+      const target = path.join(folder, name);
+      if (existsSync(target)) throw new Error(`附件 ${name} 重名，无法落地`);
+      const response = await hub.attachment(job.run, job.token, attachment.id);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length !== attachment.size) throw new Error(`附件 ${name} 下载不完整`);
+      writeFileSync(target, bytes, { mode: 0o600 });
+      files.push({ name, path: target });
+    }
+    return files;
+  }
+
   async function start(job: Job) {
     const dir = path.join(RUNS, `${job.run}-${job.attempt}`);
+    // A worker stopped after saving the job but before launching it must not start a second Agent on the next tick.
+    if (existsSync(path.join(dir, "entry.json"))) return;
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const entry: Entry = {
       run: job.run,
@@ -331,8 +369,9 @@ export function createWorker({
     save(entry);
     try {
       writeFileSync(path.join(dir, "context.json"), JSON.stringify(job.context, null, 2), { mode: 0o600 });
+      const files = await attachments(entry, job);
       const adapter = await adapterFor(job.agent.use);
-      entry.prompt = promptFor(job, path.join(dir, "context.json"));
+      entry.prompt = promptFor(job, path.join(dir, "context.json"), files);
       save(entry);
       launch(entry, adapter, entry.prompt);
     } catch (error) {
@@ -345,6 +384,17 @@ export function createWorker({
     try {
       const reading = adapter.read(snapshot(out), code, code === null ? "" : snapshot(err));
       if (!reading) throw new Error("它什么也没给");
+      // An adapter reads the whole file every time, so keep only the steps past where the last read stopped. The count is
+      // what makes a repeated identical step an event of its own rather than something already seen. If a very large output
+      // is cut to its head and tail and the count goes backwards, fall back to the step text.
+      const all = reading.progress ?? [];
+      const seen = entry.progressSeen ?? 0;
+      if (all.length >= seen) reading.progress = all.slice(seen);
+      else {
+        const sent = new Set(entry.progressSent ?? []);
+        reading.progress = all.filter((step) => !sent.has(`${step.kind ?? ""}\n${step.step}\n${step.detail ?? ""}`));
+      }
+      entry.progressSeen = all.length;
       return reading;
     } catch (error) {
       sayOnce(`run ${entry.run}: couldn't read its output: ${error}`);
@@ -366,6 +416,32 @@ export function createWorker({
       text: `这一轮按第一行算结束了，但它要中台做的事没有生效（${problem}）。原文在 ${files(original).out}，留 ${KEEP_DAYS} 天。`,
     };
     endWith(entry, { ...result, notice: [...(result.notice ?? []), notice] });
+  }
+
+  /** What the agent was seen doing since the last read, sent as progress while it still runs. */
+  async function reportProgress(entry: Entry, seen: Reading, force = false) {
+    const pending = [...(entry.progressPending ?? []), ...(seen.progress ?? [])];
+    if (!pending.length) return;
+    entry.progressPending = pending;
+    // Saved before the network: a worker stopped here still has both what it has read and what it hasn't sent.
+    save(entry);
+    const now = Date.now();
+    // One request a few seconds at most: a busy agent can print dozens of steps a second.
+    if (!force && entry.progressSentAt && now - entry.progressSentAt < PROGRESS_EVERY) return;
+    for (const step of pending) {
+      try {
+        await hub.progress(entry.run, entry.token, step);
+        entry.progressSentAt = Date.now();
+        entry.progressPending = entry.progressPending?.filter((one) => one !== step);
+        const key = `${step.kind ?? ""}\n${step.step}\n${step.detail ?? ""}`;
+        entry.progressSent = [...(entry.progressSent ?? []), key].slice(-200);
+        save(entry);
+      } catch (error) {
+        log(`run ${entry.run}: couldn't report progress: ${error}`);
+        return;
+      }
+    }
+    entry.progressPending = [];
   }
 
   /** A turn has ended. What it said is a result, or a reason to ask it again without redoing anything. */
@@ -455,6 +531,7 @@ export function createWorker({
         // The forced kill is the last thing that can be done to it, and whether it worked can't be seen.
         if (!overdue) return;
         signal(entry, "SIGKILL");
+        await reportProgress(entry, read(entry, adapter, exitCode()), true);
         // A turn that was over, or a timeout, ends on what it said: `failed` there is tried again, redoing work done.
         if (entry.why !== "cancel") return conclude(entry, adapter, exitCode());
         // Reporting `cancelled` would release the item while a process may still be in it, which the protocol forbids
@@ -464,16 +541,24 @@ export function createWorker({
           error: "停止信号发出后没能确认进程组已结束：这一轮按没跑成记，不再重试，进程可能还在。",
         });
       }
+      await reportProgress(entry, read(entry, adapter, exitCode()), true);
       return conclude(entry, adapter, exitCode());
     }
-    if (existsSync(exit)) return conclude(entry, adapter, exitCode());
+    if (existsSync(exit)) {
+      await reportProgress(entry, read(entry, adapter, exitCode()), true);
+      return conclude(entry, adapter, exitCode());
+    }
     // The shell can publish its exit between the first file check and ps returning.
     const looking = await alive(entry);
-    if (looking === false) return conclude(entry, adapter, exitCode());
+    if (looking === false) {
+      await reportProgress(entry, read(entry, adapter, exitCode()), true);
+      return conclude(entry, adapter, exitCode());
+    }
     // Unable to look, the run counts as still going, so its timeout and its finished turn still end it.
     if (looking === null && !blind) log(`couldn't inspect processes; runs count as going until they end or time out`);
     blind = looking === null;
     const seen = read(entry, adapter, null);
+    await reportProgress(entry, seen);
     // Kept as soon as it's read: if the end can't be read, the one made up at launch may be nothing its CLI knows of.
     if (seen.session && seen.session !== entry.session) {
       entry.session = seen.session;

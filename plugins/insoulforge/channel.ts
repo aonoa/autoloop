@@ -98,15 +98,70 @@ export function mustRelay(card: Card) {
   return kindOf(card) !== "progress";
 }
 
-export function notificationOf(card: Card, target: string) {
+/** One notification frame: the head names the card, the tail tells the chat model what it is looking at and where to reply. */
+function frame(card: Card, target: string, body: string, part?: { index: number; total: number }) {
   // InSoulForge injects a `system` sender for Activity notifications, so the text has to carry the conversation the work
   // belongs to. Without it, the chat model cannot build the `target_session` for a follow-up submit.
   const kind = kindOf(card);
-  const relay = mustRelay(card)
-    ? "这是已完成的任务或需要用户决定的问题，必须转告用户；转述时保留任务名、结果和需要决定的事项，不要改写成闲聊。"
-    : "这是进度或状态通知，用户没有在等这个结果时可以保持安静。";
-  const text = `[Autoloop 状态] ${TAG[kind]}\n\n${words(card)}\n\n[系统通知] 会话：${target}。这是 Agent Autoloop 的回投，不是用户新消息。${relay}`;
+  const head = `[Autoloop 状态] ${TAG[kind]}${part ? `（第 ${part.index}/${part.total} 段）` : ""}`;
+  // Every part says it must be relayed: a chat model shown only one frame still has to know the person is waiting for it.
+  const relay = !mustRelay(card)
+    ? "这是进度或状态通知，用户没有在等这个结果时可以保持安静。"
+    : part
+      ? `这是已完成的任务结果，必须转告用户。这是同一份结果的第 ${part.index}/${part.total} 段，共 ${part.total} 段：` +
+        "前面的段已经发过，不要重复，也不要把这一段概括掉；转述时保留任务名、结果和需要决定的事项，不要改写成闲聊。"
+      : "这是已完成的任务或需要用户决定的问题，必须转告用户；转述时保留任务名、结果和需要决定的事项，不要改写成闲聊。";
+  const text = `${head}\n\n${body}\n\n[系统通知] 会话：${target}。这是 Agent Autoloop 的回投，不是用户新消息。${relay}`;
   return { type: "notify", target_session: target, text, mode: modeOf(card) } as const;
+}
+
+export function notificationOf(card: Card, target: string) {
+  return frame(card, target, words(card));
+}
+
+/**
+ * One chat message holds at most this much before the chat app clips it. A report is split on its own lines, so no
+ * paragraph or list item arrives half-said.
+ */
+export const PART = 3000;
+
+/**
+ * Split a notification into chat-sized parts, each still saying which task it belongs to and which part it is. Splitting
+ * only at line breaks keeps a long report readable; only a single line longer than a part is cut, and its cut half says
+ * that it continues.
+ */
+export function parts(text: string, limit = PART): string[] {
+  if (text.length <= limit) return [text];
+  const chunks: string[] = [];
+  let current = "";
+  const flush = () => {
+    if (current) chunks.push(current);
+    current = "";
+  };
+  for (const line of text.split("\n")) {
+    if (line.length > limit) {
+      flush();
+      for (let at = 0; at < line.length; at += limit) chunks.push(line.slice(at, at + limit));
+      continue;
+    }
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length > limit) {
+      flush();
+      current = line;
+    } else current = next;
+  }
+  flush();
+  return chunks;
+}
+
+/**
+ * Every frame a card takes. A short card is one frame, exactly as before. A long report becomes several, so nothing past
+ * the chat app's own limit is clipped away; each names the card and its place in the sequence.
+ */
+export function notificationsOf(card: Card, target: string) {
+  const chunks = parts(words(card));
+  if (chunks.length === 1) return [frame(card, target, chunks[0]!)];
+  return chunks.map((chunk, index) => frame(card, target, chunk, { index: index + 1, total: chunks.length }));
 }
 
 /** A restart must not replay every historic card. Cards that existed before this process started and were never delivered
@@ -249,7 +304,11 @@ export default async function insoulforge({ hub, options, log, signal }: Channel
     }
     if (ready && socket) {
       try {
-        socket.send(JSON.stringify(notificationOf(card, target)));
+        for (const notice of notificationsOf(card, target)) {
+          socket.send(JSON.stringify(notice));
+          // Leave room between frames so a chat app that rate-limits per conversation still takes them in order.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
       } catch (error) {
         log(`卡片 ${card.id} 没回投：${error}`);
         ready = false;

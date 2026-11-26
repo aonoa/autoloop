@@ -8,6 +8,17 @@ import { findProgram, tail, type Adapter } from "../../worker/agents.ts";
 import { readMessage, receiptBlock } from "../../worker/contract.ts";
 
 const PERMISSIONS = { read: "plan", edit: "acceptEdits", full: "bypassPermissions" };
+const oneLine = (text: string) => text.replace(/\s+/g, " ").trim().slice(0, 200);
+/** Tool input can be a whole file: name the few fields that tell a person what it touched. */
+function summaryOf(input: unknown) {
+  if (typeof input === "string") return oneLine(input);
+  if (!input || typeof input !== "object" || Array.isArray(input)) return "";
+  const item = input as Record<string, unknown>;
+  const named = ["command", "path", "file_path", "pattern", "query", "url", "description"]
+    .map((key) => item[key])
+    .find((value) => typeof value === "string" && value.trim());
+  return typeof named === "string" ? oneLine(named) : "";
+}
 
 /** The newest Claude Code the desktop app ships, for those without a separate install. */
 export function inTheApp() {
@@ -59,6 +70,35 @@ export default {
     const started =
       result?.num_turns > 0 || messages.some((message) => message?.type === "assistant" || message?.subtype === "init");
     const known = { ...(session && { session }), ...(started && { started }) };
+    const progress = messages.flatMap((message) => {
+      if (message?.type === "assistant" && Array.isArray(message.message?.content)) {
+        return message.message.content.flatMap((part: any) => {
+          if (part?.type === "tool_use")
+            return [
+              {
+                kind: "tool",
+                step: `调用工具：${part.name}${summaryOf(part.input) ? `（${summaryOf(part.input)}）` : ""}`,
+              },
+            ];
+          if (part?.type === "text" && part.text?.trim())
+            return [{ kind: "message", step: `说：${oneLine(part.text)}` }];
+          return [];
+        });
+      }
+      if (message?.type === "user" && Array.isArray(message.message?.content)) {
+        return message.message.content.flatMap((part: any) =>
+          part?.type === "tool_result"
+            ? [
+                {
+                  kind: "tool-done",
+                  step: `${part.is_error ? "工具失败" : "工具完成"}${summaryOf(part.content) ? `：${summaryOf(part.content)}` : ""}`,
+                },
+              ]
+            : [],
+        );
+      }
+      return [];
+    });
     // Each turn ends in a result, and a background task brings it back for another when it ends. Only one that's left
     // nothing to come back for is its answer, unless it has exited by itself: then it was its last word.
     const later = messages.slice(messages.lastIndexOf(result) + 1);
@@ -68,9 +108,10 @@ export default {
     const tasks = messages.findLast((message) => message?.subtype === "background_tasks_changed")?.tasks ?? [];
     if (!result || another || (tasks.length && code !== 0)) {
       // Its messages are what it was doing, not what went wrong.
+      const extra = progress.length ? { progress } : {};
       return code === null
-        ? known
-        : { ...known, error: tail(stderr || (messages.length ? "" : stdout)) || "没留下结果" };
+        ? { ...known, ...extra }
+        : { ...known, ...extra, error: tail(stderr || (messages.length ? "" : stdout)) || "没留下结果" };
     }
     // Its input_tokens leave out what was read from or written to the cache; `input` counts all of it, as Codex's does.
     const usage = result.usage
@@ -104,7 +145,7 @@ export default {
       const error = said.split("\n")[0] || result.errors?.[0] || result.subtype || "没留下结果";
       return { ...known, usage, sessionUsage, finished: true, error };
     }
-    return { text, ...known, usage, sessionUsage, finished: true };
+    return { text, ...known, usage, sessionUsage, finished: true, ...(progress.length ? { progress } : {}) };
   },
   link: (session) => `claude://resume?session=${session}`,
   check(given) {

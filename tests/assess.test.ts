@@ -48,6 +48,9 @@ const job = (kind?: "assess" | "dispatch"): Job =>
               online: true,
               subjects: ["#mini*"],
               aliases: [],
+              description: "迷你项目",
+              canContinue: false,
+              preferences: [],
             },
           ],
           matters: [{ project: "mini", rule: "QQ 任务 mini", lane: "", stage: "idle", lastRun: 2 }],
@@ -78,6 +81,7 @@ test("a dispatcher round is told to choose a project, not to do the work", () =>
   assert.match(text, /QQ 任务 mini/);
   assert.match(text, /"route"/);
   assert.match(text, /"session":"continue 或 new 或 ask"/);
+  assert.match(text, /```agent-autoloop/);
   assert.ok(!text.includes("按手册做。"), "the dispatcher never gets the rule's work prompt");
   assert.ok(!text.includes('```agent-autoloop\n{"ask"'), "the dispatcher is not given the work receipt template");
 });

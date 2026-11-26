@@ -3,6 +3,7 @@
 import { realpathSync, watch } from "node:fs";
 import { basename, dirname } from "node:path";
 import { RULES_FILE } from "./home.ts";
+import * as attachments from "./attachments.ts";
 import { loadPlugin } from "./plugins.ts";
 import * as hub from "./runtime.ts";
 import { AuthError, NotFound } from "../kernel/errors.ts";
@@ -103,6 +104,12 @@ export function makeHandler(commit = "dev") {
     const justSeen = type === "heartbeat" || type === "channelSeen";
     if (!justSeen || facts.some((fact) => fact.changes.some((change) => change.table === "cards"))) wake();
     arm();
+    // A dispatcher's proposal is a fact; the host writes the project after that fact commits, never inside the kernel.
+    if (facts.some((fact) => fact.changes.some((change) => change.table === "project_creations")))
+      queueMicrotask(() => {
+        for (const creation of hub.pendingCreations()) hub.applyCreation(creation);
+        wake();
+      });
   });
   // libuv 1.52 (Node 24.16+) on Windows asserts and exits on the first change in a folder named through an 8.3 short name.
   const watcher = watch(realpathSync.native(dirname(RULES_FILE)), (_event, file) => {
@@ -136,6 +143,8 @@ export function makeHandler(commit = "dev") {
     },
     stream: logStream,
     adapt: adaptWebhook,
+    project: hub.project,
+    attachments,
   });
   fire();
   return {

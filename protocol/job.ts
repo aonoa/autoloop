@@ -1,4 +1,5 @@
 import type { Rule } from "../kernel/rules.ts";
+import type { EventAttachment } from "./validate.ts";
 export type Job = {
   run: number;
   token: string;
@@ -50,6 +51,8 @@ export type Job = {
       link: string;
       receivedAt: string;
       hops?: number;
+      /** Files the source uploaded for this event; the worker downloads them before starting the Agent. */
+      attachments?: EventAttachment[];
     }[];
     answers: {
       card: number;
@@ -69,15 +72,27 @@ export type Job = {
     /** What a dispatcher may choose from: the hub's facts, never remembered by the model. Only for `dispatch` rounds. */
     dispatch?: {
       minConfidence: number;
+      /** Whether a dispatcher may propose a project that does not exist yet. */
+      create: boolean;
+      /** Workers that may receive an automatically created project; empty means any registered worker. */
+      workers: string[];
       projects: {
         project: string;
         rule: string;
+        description: string;
         cwd: string;
         agent: string;
         worker: string;
         online: boolean;
         subjects: string[];
         aliases: string[];
+        lastRun?: number;
+        lastSession?: string | null;
+        lastState?: string;
+        lastSummary?: string | null;
+        canContinue: boolean;
+        lastDispatch?: { run: number; confidence: number; reason: string; at: string };
+        preferences: { source: string; actor: string; reason: string; confirmations: number }[];
       }[];
       matters: { project?: string; rule: string; lane: string; stage: string; lastRun: number }[];
       recentRuns: { run: number; project?: string; rule: string; state: string; summary: string; at: string | null }[];
