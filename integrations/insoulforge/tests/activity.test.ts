@@ -792,11 +792,99 @@ test("a screenshot that cannot be downloaded fails the submit instead of droppin
       },
     );
     assert.equal(result.success, false);
-    assert.match(result.error, /截图附件没有交上/);
+    assert.match(result.error, /附件没有交上/);
     assert.match(result.error, /图片票据无效或已过期/);
     assert.equal(submitted, false);
   } finally {
     server.closeAllConnections();
     server.close();
   }
+});
+
+test("documents from the trusted context are uploaded with their own type and name", async () => {
+  const csv = Buffer.from("项目,金额\n医保,100\n", "utf8");
+  const requests: string[] = [];
+  const uploads: any[] = [];
+  let submitted: any;
+  const server = createServer((request, response) => {
+    requests.push(request.url ?? "");
+    assert.equal(request.headers.authorization, `Bearer ${config.activity.token}`);
+    if (request.url?.startsWith("/activities/attachments/file_01234567?")) {
+      response.writeHead(200, { "content-type": "text/csv" });
+      response.end(csv);
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ success: false, error: "文件票据无效或已过期" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const service = createService(
+      { ...config, activity: { ...config.activity, url: `${base.replace("http", "ws")}/activities/ws` } },
+      {
+        submit: async (event) => {
+          submitted = event;
+          return { event: 12, duplicate: false, routed: ["QQ 任务"], paused: [] };
+        },
+        upload: async (name, mediaType, bytes) => {
+          uploads.push({ name, mediaType, bytes: Buffer.from(bytes) });
+          return { id: "att_0123456789abcdef", name, mediaType, size: bytes.length };
+        },
+        outcome: async () => ({ runs: [] }),
+        state: async () => ({ cards: [], runs: [] }),
+        answer: async () => ({}),
+      },
+    );
+    const result: any = await service.handle(
+      { action: "submit", project: "shop", text: "按这张表核对", target_session: "group:20002002" },
+      {
+        sender_id: "10001001",
+        session_id: "group:20002002",
+        attachments: [
+          {
+            attachment_id: "file_01234567",
+            name: "指标.csv",
+            media_type: "text/csv",
+            ticket: "signed.file",
+          },
+        ],
+      },
+    );
+    assert.equal(result.success, true);
+    assert.match(requests[0] ?? "", /ticket=signed\.file/);
+    assert.deepEqual(uploads[0]?.bytes, csv);
+    assert.equal(uploads[0]?.mediaType, "text/csv");
+    assert.deepEqual(submitted.attachments, [
+      { id: "att_0123456789abcdef", name: "指标.csv", mediaType: "text/csv", size: csv.length },
+    ]);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("a file the main program could not download fails the submit instead of dropping it", async () => {
+  let submitted = false;
+  const service = createService(config, {
+    submit: async () => {
+      submitted = true;
+      return { event: 1, duplicate: false, routed: [], paused: [] };
+    },
+    upload: async (name, mediaType, bytes) => ({ id: "att_0123456789abcdef", name, mediaType, size: bytes.length }),
+    outcome: async () => ({ runs: [] }),
+    state: async () => ({ cards: [], runs: [] }),
+    answer: async () => ({}),
+  });
+  const result: any = await service.handle(
+    { action: "submit", project: "shop", text: "看一下", target_session: "group:20002002" },
+    {
+      sender_id: "10001001",
+      session_id: "group:20002002",
+      attachments: [{ name: "指标.csv", error: "文件下载失败：超时" }],
+    },
+  );
+  assert.equal(result.success, false);
+  assert.match(result.error, /指标\.csv|第 1 个文件|超时/);
+  assert.equal(submitted, false);
 });

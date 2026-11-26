@@ -1,21 +1,20 @@
 // Uploaded files live beside the hub's data, addressed by a random id. This module owns their bytes and ownership; the
 // kernel only records the reference an event carries, so the fact log stays small and the kernel never touches a file.
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HOME } from "./home.ts";
 import { privateDirectory } from "./files.ts";
 import { InputError, NotFound } from "../kernel/errors.ts";
-import { ATTACHMENT_TYPES, MAX_ATTACHMENT_BYTES, type EventAttachment } from "../protocol/validate.ts";
+import {
+  ATTACHMENT_EXTENSIONS,
+  ATTACHMENT_TYPES,
+  MAX_ATTACHMENT_BYTES,
+  type EventAttachment,
+} from "../protocol/validate.ts";
 
 const ROOT = join(HOME, "attachments");
 const ID = /^att_[0-9a-f]{16}$/;
-const EXTENSIONS: Record<string, string> = {
-  "image/png": "png",
-  "image/jpeg": "jpg",
-  "image/webp": "webp",
-  "image/gif": "gif",
-};
 privateDirectory(ROOT);
 
 type Stored = EventAttachment & { source: string };
@@ -27,8 +26,8 @@ function bytesPath(id: string) {
   return join(ROOT, `${id}.bin`);
 }
 
-/** The declared type has to match the bytes, so a renamed HTML file cannot arrive as an image. */
-function actualType(bytes: Buffer): string | undefined {
+/** The bytes have to be what the declared type says, so a renamed HTML or executable cannot arrive as a document. */
+function imageType(bytes: Buffer): string | undefined {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
     return "image/png";
   }
@@ -45,11 +44,50 @@ function actualType(bytes: Buffer): string | undefined {
   return undefined;
 }
 
+const OFFICE_MARKERS: Record<string, string> = {
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word/",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xl/",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "ppt/",
+};
+
+/** Text is checked as text: valid UTF-8 without NUL, and JSON is parsed rather than trusted by its extension. */
+function isText(bytes: Buffer, mediaType: string): boolean {
+  if (bytes.includes(0)) return false;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  if (mediaType === "application/json") {
+    try {
+      JSON.parse(bytes.toString("utf8"));
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function matchesType(bytes: Buffer, mediaType: string): boolean {
+  if (mediaType.startsWith("image/")) return imageType(bytes) === mediaType;
+  if (mediaType === "application/pdf") return bytes.subarray(0, 5).toString("latin1") === "%PDF-";
+  if (mediaType === "application/zip") {
+    return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+  }
+  const marker = OFFICE_MARKERS[mediaType];
+  if (marker) {
+    if (!(bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b)) return false;
+    // A container's entry names live in its central directory; look for the part each application always writes.
+    return bytes.includes(Buffer.from(marker, "utf8"));
+  }
+  return isText(bytes, mediaType);
+}
+
 function safeName(name: string, mediaType: string): string {
   if (typeof name !== "string" || !name || name.length > 200 || /[/\\\x00-\x1f\x7f]/.test(name)) {
-    throw new InputError("附件 name 要是安全的图片文件名");
+    throw new InputError("附件 name 要是安全的文件名");
   }
-  if (!/\.(png|jpe?g|webp|gif)$/i.test(name)) throw new InputError("附件 name 要是图片文件名");
+  if (!ATTACHMENT_EXTENSIONS[mediaType].test(name)) throw new InputError("附件后缀与 mediaType 不一致");
   return name;
 }
 
@@ -58,9 +96,9 @@ export function save(source: string, name: unknown, mediaType: unknown, bytes: B
   if (!Buffer.isBuffer(bytes) || !bytes.length) throw new InputError("附件不能为空");
   if (bytes.length > MAX_ATTACHMENT_BYTES) throw new InputError(`附件不能超过 ${MAX_ATTACHMENT_BYTES} 字节`);
   if (typeof mediaType !== "string" || !(ATTACHMENT_TYPES as readonly string[]).includes(mediaType)) {
-    throw new InputError("附件 mediaType 只能是 PNG、JPEG、WebP 或 GIF");
+    throw new InputError(`附件 mediaType 只能是 ${ATTACHMENT_TYPES.join("、")}`);
   }
-  if (actualType(bytes) !== mediaType) throw new InputError("附件内容和 mediaType 不一致");
+  if (!matchesType(bytes, mediaType)) throw new InputError("附件内容和 mediaType 不一致");
   if (typeof name !== "string") throw new InputError("附件 name 要是文字");
   if (name !== name.normalize("NFC")) throw new InputError("附件 name 要是规范的 Unicode 文件名");
   const safe = safeName(name, mediaType);

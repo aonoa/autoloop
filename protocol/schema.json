@@ -1493,15 +1493,29 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200,
-          "pattern": "^[^/\\\\\\\\\\u0000-\\u001f\\u007f]+\\.(png|jpe?g|webp|gif)$"
+          "pattern": "^[^/\\\\\\\\\\u0000-\\u001f\\u007f]+\\.(png|jpe?g|webp|gif|pdf|zip|docx|xlsx|pptx|txt|log|md|markdown|csv|json)$"
         },
         "mediaType": {
-          "enum": ["image/png", "image/jpeg", "image/webp", "image/gif"]
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif",
+            "application/pdf",
+            "application/zip",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "text/plain",
+            "text/markdown",
+            "text/csv",
+            "application/json"
+          ]
         },
         "size": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 25165824
+          "maximum": 134217728
         }
       },
       "required": ["id", "name", "mediaType", "size"],

@@ -35,7 +35,7 @@ export type Services = {
 };
 
 const MAX_BODY = 1024 * 1024;
-const MAX_ATTACHMENT_BODY = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_BODY = 129 * 1024 * 1024;
 const MAX_WAIT_SECONDS = 50;
 const LINK_LIFETIME = 7 * 86400_000;
 const CARD_LINK = /^\/c\/([A-Za-z0-9_-]{1,64})$/;

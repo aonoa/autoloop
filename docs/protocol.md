@@ -167,9 +167,9 @@ POST /v1/events                    Authorization: Bearer <来源的密钥>
 - 没有规则匹配的事件也留着，`agent-autoloop status` 看得到。
 - 字段上限：`id` 200 个字、`subject` 100、`summary` 200、`detail` 4000、`link` 500，`type` 64 个字符。
 
-### 附件：截图和图片原样交给 Agent
+### 附件：截图和文件原样交给 Agent
 
-任务文字有时解释不了一张报错截图。来源可以先把图片传给中台，再在事件里引用它：
+任务文字有时解释不了一张报错截图或一份表格。来源可以先把文件传给中台，再在事件里引用它：
 
 ```
 POST /v1/attachments                Authorization: Bearer <来源的密钥>
@@ -181,11 +181,11 @@ POST /v1/events
   "attachments": [ { "id": "att_0123456789abcdef", "name": "screenshot.png", "mediaType": "image/png", "size": 18432 } ] }
 ```
 
-- 只收 PNG、JPEG、WebP、GIF，单张最多 24 MiB，一条事件最多 8 张；文件名不能带路径分隔符或控制字符。
-- 中台按文件头核对内容和 `mediaType`，事件只能引用同一来源上传、名字/类型/大小都一致且仍存在的附件。老来源和老事件不带 `attachments` 时行为不变。
+- 收图片（PNG、JPEG、WebP、GIF）和文档（PDF、ZIP、DOCX、XLSX、PPTX、TXT/LOG、Markdown、CSV、JSON）；单个最多 128 MiB，一条事件最多 8 个；文件名不能带路径分隔符或控制字符。
+- 中台按文件头和内容核对 `mediaType`，文本类还要求后缀与内容一致；事件只能引用同一来源上传、名字/类型/大小都一致且仍存在的附件。老来源和老事件不带 `attachments` 时行为不变。
 - 中台只把附件元数据和随机 `id` 记进事件；字节放在数据目录的 `attachments/`，内核不读文件。
 - 来源读回自己的原图：`GET /v1/attachments/<id>`，同样用来源密钥；别的来源看不到。`GET /v1/runs/<编号>/attachments/<id>` 用这一轮的 token，且这一轮的上下文事件必须引用该附件；轮次结束后不能再读。
-- 接单程序领到带附件的一轮后，先把图片下载到 `<run>/attachments/<name>`，再把绝对路径写进提示词。下载失败时这一轮明确失败，不会在没有截图的情况下启动 Agent。
+- 接单程序领到带附件的一轮后，先把文件下载到 `<run>/attachments/<name>`，再把绝对路径写进提示词。下载失败时这一轮明确失败，不会在没有原始材料的情况下启动 Agent。
 
 配置 `policy.dispatch` 后，没有匹配、也没有被 Policy 拒绝的**任务**外部事件会先排一轮 `kind: "dispatch"` 的只读调度轮。调度 Agent 提交 `route`，由中台重新校验项目、来源、发送人、节点和置信度后，再走与普通事件相同的派发路径；不是任务的聊天可以提交带 `"fyi": true` 的 `notice`，直接回到原会话，不启动项目轮次。未配置时行为不变：事件只记录，不自动放置。协议细节见[配置手册](configuration.md#调度-agentpolicydispatch)和[设计文档](design.md#dispatch调度-agent)。
 

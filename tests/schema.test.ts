@@ -91,7 +91,7 @@ test("events carry bounded attachment references without trusting names or bytes
     { ...attachment, name: "shot.exe" },
     { ...attachment, mediaType: "text/html" },
     { ...attachment, size: 0 },
-    { ...attachment, size: 24 * 1024 * 1024 + 1 },
+    { ...attachment, size: 128 * 1024 * 1024 + 1 },
     { ...attachment, unknown: true },
   ]) {
     const input = { ...event, attachments: [bad] };
@@ -101,6 +101,49 @@ test("events carry bounded attachment references without trusting names or bytes
   const tooMany = { ...event, attachments: Array(9).fill(attachment) };
   assert.throws(() => parseEvent(tooMany));
   assert.ok(checkSchema("event", tooMany).length);
+});
+
+test("documents are first-class attachments but keep the same name and type agreement", () => {
+  const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  for (const item of [
+    { name: "指标.pdf", mediaType: "application/pdf" },
+    { name: "表格.xlsx", mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    { name: "汇报.pptx", mediaType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+    { name: "报告.docx", mediaType: docx },
+    { name: "打包.zip", mediaType: "application/zip" },
+    { name: "说明.md", mediaType: "text/markdown" },
+    { name: "指标.csv", mediaType: "text/csv" },
+    { name: "数据.json", mediaType: "application/json" },
+    { name: "app.log", mediaType: "text/plain" },
+  ]) {
+    const input = { id: "doc", type: "qq.task", attachments: [{ id: "att_0123456789abcdef", size: 9, ...item }] };
+    assert.deepEqual(parseEvent(input).attachments, input.attachments);
+    assert.deepEqual(checkSchema("event", input), []);
+  }
+  const rejected = [
+    { name: "报告.doc", mediaType: docx },
+    { name: "report.docx", mediaType: "text/plain" },
+    { name: "run.sh", mediaType: "text/plain" },
+    { name: "page.html", mediaType: "text/plain" },
+    { name: "app.exe", mediaType: "application/zip" },
+    { name: "x.pdf", mediaType: "application/octet-stream" },
+  ];
+  for (const bad of rejected) {
+    const input = { id: "doc", type: "qq.task", attachments: [{ id: "att_0123456789abcdef", size: 9, ...bad }] };
+    assert.throws(() => parseEvent(input), JSON.stringify(bad));
+  }
+  // The wire schema bounds each field on its own; only the validator knows which names pair with which types.
+  const pairedOnly = rejected[1];
+  const pairedInput = {
+    id: "doc",
+    type: "qq.task",
+    attachments: [{ id: "att_0123456789abcdef", size: 9, ...pairedOnly }],
+  };
+  assert.deepEqual(checkSchema("event", pairedInput), []);
+  for (const bad of rejected.filter((item) => item !== pairedOnly)) {
+    const input = { id: "doc", type: "qq.task", attachments: [{ id: "att_0123456789abcdef", size: 9, ...bad }] };
+    assert.ok(checkSchema("event", input).length, JSON.stringify(bad));
+  }
 });
 
 test("schema checks reject inherited names and incomplete tasks or question cards", () => {

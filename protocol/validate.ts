@@ -129,12 +129,42 @@ export type EventInput = {
 
 /** A file a source uploaded through `/v1/attachments`; `name` is display metadata, never a path. */
 export type EventAttachment = { id: string; name: string; mediaType: string; size: number };
-export const ATTACHMENT_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
+/** The file types a source may hand to an Agent. Executables and scripts stay out: a task that needs one has to ask. */
+export const ATTACHMENT_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "application/pdf",
+  "application/zip",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "application/json",
+] as const;
 export const MAX_ATTACHMENTS = 8;
-export const MAX_ATTACHMENT_BYTES = 24 * 1024 * 1024;
+export const MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024;
 const ATTACHMENT_ID = /^att_[0-9a-f]{16}$/;
 const ATTACHMENT_NAME = /^[^/\\\x00-\x1f\x7f]{1,200}$/;
-const ATTACHMENT_EXTENSION = /\.(png|jpe?g|webp|gif)$/i;
+/** Extensions a name may carry for each declared type; both must agree, so a renamed file cannot slip past the type. */
+export const ATTACHMENT_EXTENSIONS: Record<string, RegExp> = {
+  "image/png": /\.png$/i,
+  "image/jpeg": /\.jpe?g$/i,
+  "image/webp": /\.webp$/i,
+  "image/gif": /\.gif$/i,
+  "application/pdf": /\.pdf$/i,
+  "application/zip": /\.zip$/i,
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": /\.docx$/i,
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": /\.xlsx$/i,
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": /\.pptx$/i,
+  "text/plain": /\.(txt|log)$/i,
+  "text/markdown": /\.(md|markdown)$/i,
+  "text/csv": /\.csv$/i,
+  "application/json": /\.json$/i,
+};
 
 function parseAttachment(input: unknown): EventAttachment {
   if (typeof input !== "object" || input === null || Array.isArray(input))
@@ -148,11 +178,11 @@ function parseAttachment(input: unknown): EventAttachment {
   const mediaType = given.mediaType;
   const size = given.size;
   if (typeof id !== "string" || !ATTACHMENT_ID.test(id)) throw new InputError("附件 id 不是中台签发的编号");
-  if (typeof name !== "string" || !ATTACHMENT_NAME.test(name) || !ATTACHMENT_EXTENSION.test(name)) {
-    throw new InputError("附件 name 要是安全的图片文件名");
-  }
   if (typeof mediaType !== "string" || !(ATTACHMENT_TYPES as readonly string[]).includes(mediaType)) {
-    throw new InputError("附件 mediaType 只能是 PNG、JPEG、WebP 或 GIF");
+    throw new InputError(`附件 mediaType 只能是 ${ATTACHMENT_TYPES.join("、")}`);
+  }
+  if (typeof name !== "string" || !ATTACHMENT_NAME.test(name) || !ATTACHMENT_EXTENSIONS[mediaType].test(name)) {
+    throw new InputError("附件 name 要是安全的文件名，并且后缀与 mediaType 一致");
   }
   if (!Number.isSafeInteger(size) || (size as number) < 1 || (size as number) > MAX_ATTACHMENT_BYTES) {
     throw new InputError(`附件 size 要在 1 到 ${MAX_ATTACHMENT_BYTES} 字节之间`);

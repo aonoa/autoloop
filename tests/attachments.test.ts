@@ -1,5 +1,6 @@
 // Failure modes: an event refers to a file that was never uploaded; one source reads another's bytes; a traversal name,
-// unsupported type, oversized body or expired id is accepted; an uploaded attachment is not carried to the run context.
+// unsupported type, oversized body or expired id is accepted; an uploaded attachment is not carried to the run context;
+// a document is judged by its extension alone, so renamed HTML, a script or mismatched JSON slips through.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -57,6 +58,9 @@ const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9d1QAAAABJRU5ErkJggg==",
   "base64",
 );
+const pdf = Buffer.from("%PDF-1.7\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n", "latin1");
+const text = Buffer.from("季度指标\n收入,成本\n", "utf8");
+const zipOf = (marker: string) => Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from(marker, "utf8")]);
 const send = (body: unknown, key = keys.app) =>
   fetch(`${base}/v1/events`, {
     method: "POST",
@@ -106,8 +110,50 @@ test("unsafe names, wrong media types and bytes that are not an image are refuse
   assert.equal((await upload(png, "screenshot.exe")).status, 400);
   assert.equal((await upload(png, "screenshot.png", "text/html")).status, 400);
   assert.equal((await upload(Buffer.from("not an image"), "screenshot.png", "image/png")).status, 400);
+  assert.equal((await upload(Buffer.from("<script>alert(1)</script>"), "notes.txt", "text/plain")).status, 200);
+  assert.equal((await upload(Buffer.from("<script>alert(1)</script>"), "notes.html", "text/plain")).status, 400);
+  assert.equal((await upload(Buffer.from('{"a":1}'), "notes.txt", "application/json")).status, 400);
+  assert.equal((await upload(Buffer.from("not json"), "notes.json", "application/json")).status, 400);
+  assert.equal((await upload(Buffer.from("PK\\x03\\x04rest"), "receipt.pdf", "application/pdf")).status, 400);
   // "other" is a real source key: uploading is allowed, but it owns a different file set.
   assert.equal((await upload(png, "screenshot.png", "image/png", keys.other)).status, 200);
+});
+
+test("documents travel like images when their bytes match their declared type", async () => {
+  const cases = [
+    { bytes: pdf, name: "指标.pdf", type: "application/pdf" },
+    { bytes: text, name: "指标.csv", type: "text/csv" },
+    { bytes: text, name: "说明.md", type: "text/markdown" },
+    { bytes: Buffer.from('{"quarter":"2026Q3"}'), name: "指标.json", type: "application/json" },
+    { bytes: Buffer.from("plain text"), name: "notes.txt", type: "text/plain" },
+    { bytes: Buffer.from("error: disk full"), name: "app.log", type: "text/plain" },
+    {
+      bytes: zipOf("word/document.xml"),
+      name: "报告.docx",
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    {
+      bytes: zipOf("xl/workbook.xml"),
+      name: "表格.xlsx",
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+    {
+      bytes: zipOf("ppt/presentation.xml"),
+      name: "汇报.pptx",
+      type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    },
+    { bytes: zipOf("payload/data.json"), name: "打包.zip", type: "application/zip" },
+  ];
+  for (const item of cases) {
+    const made = await upload(item.bytes, item.name, item.type);
+    assert.equal(made.status, 200, item.name);
+    assert.equal(made.json.mediaType, item.type);
+    const ack = await send({ id: `doc-${item.name}`, type: "qq.a", attachments: [made.json] });
+    assert.equal(ack.status, 200, item.name);
+    const job = hub.claimNext("w1", `doc-claim-${item.name}`)!;
+    assert.deepEqual(job.context.events[0].attachments, [made.json]);
+    hub.finish(job.run, job.token, { outcome: "done", summary: "完成" });
+  }
 });
 
 test("an event can only name attachments its own source uploaded", async () => {

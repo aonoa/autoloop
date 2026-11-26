@@ -75,7 +75,7 @@ submit：提交一个新任务。
   - project_hint：可选的项目短名，只能是下列之一（不是文件路径）；拿不准时不要填，Autoloop 的调度 Agent 会判断：
 ${projects}${general}
   - text：任务原话，最多 4000 字。
-  - 用户在本轮发来的截图或图片会由主程序放进可信 context.attachments，并由本服务自动转交；你不能在 parameters 里写图片 ID 或票据，也不用把图片描述当成原图。
+  - 用户在本轮发来的截图、图片和文件会由主程序放进可信 context.attachments，并由本服务自动转交；你不能在 parameters 里写附件 ID 或票据，也不用把图片描述当成原图。
   - target_session：从本轮 current_session 复制，规则见下节；服务会与应用注入的当前会话核对。
   - 成功返回 run/target_session/routed，以及可直接发给用户的 ack 文案；没有 hint 时 project 可能为空，表示正在判断项目。
   - 提交成功后，必须先把 ack 或等价的一句话发给用户；没有 hint 时说明“已提交，正在判断属于哪个项目”，不要说“没有规则接单”。
@@ -380,17 +380,53 @@ function activityHttpBase(config: Config) {
   return url.toString().replace(/\/$/, "");
 }
 
-/** Download the exact screenshots the main program signed for this request, never an image id from model text. */
+/** Download the exact files the main program signed for this request, never an id from model text. */
 async function downloadAttachments(config: Config, hub: Hub, context: unknown, log: (line: string) => void) {
   const raw =
     context && typeof context === "object" && !Array.isArray(context) ? (context as any).attachments : undefined;
   if (raw === undefined) return [];
-  if (!Array.isArray(raw) || raw.length > 8) throw new Error("本轮图片附件格式不正确或超过 8 张");
+  if (!Array.isArray(raw) || raw.length > 8) throw new Error("本轮附件格式不正确或超过 8 个");
   const uploaded: EventAttachment[] = [];
   for (const [index, item] of raw.entries()) {
-    if (!item || typeof item !== "object" || typeof item.image_id !== "string" || typeof item.ticket !== "string") {
-      throw new Error(`第 ${index + 1} 张图片缺少签名票据`);
+    if (item && typeof item === "object" && typeof item.error === "string") {
+      throw new Error(`第 ${index + 1} 个文件取不回来：${item.error}`);
     }
+    if (!item || typeof item !== "object" || typeof item.ticket !== "string") {
+      throw new Error(`第 ${index + 1} 个附件缺少签名票据`);
+    }
+    if (typeof item.attachment_id === "string") {
+      if (!/^file_[0-9a-f]{8}$/.test(item.attachment_id)) throw new Error("文件编号格式不正确");
+      const mediaType = typeof item.media_type === "string" ? item.media_type : "";
+      const name = typeof item.name === "string" ? item.name : "";
+      if (!mediaType || !name) throw new Error(`第 ${index + 1} 个文件缺少类型或文件名`);
+      const url = new URL(
+        `${activityHttpBase(config)}/activities/attachments/${encodeURIComponent(item.attachment_id)}`,
+      );
+      url.searchParams.set("name", config.activity.name ?? "autoloop");
+      url.searchParams.set("ticket", item.ticket);
+      const response = await fetch(url, {
+        headers: { authorization: `Bearer ${config.activity.token}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`;
+        try {
+          const body: any = await response.json();
+          if (body?.error) detail = body.error;
+        } catch {}
+        throw new Error(`第 ${index + 1} 个文件取不回来：${detail}`);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (!bytes.length || bytes.length > 128 * 1024 * 1024) throw new Error("文件为空或超过 128 MiB");
+      try {
+        uploaded.push(await hub.upload(name, mediaType, bytes));
+      } catch (error) {
+        log(`文件 ${item.attachment_id} 上传中台失败：${error}`);
+        throw new Error(`第 ${index + 1} 个文件没有交到中台：${(error as Error).message}`);
+      }
+      continue;
+    }
+    if (typeof item.image_id !== "string") throw new Error(`第 ${index + 1} 个附件缺少编号`);
     if (!/^img_[0-9a-f]{8}$|^[0-9a-f]{64}$/.test(item.image_id)) throw new Error("图片编号格式不正确");
     const url = new URL(`${activityHttpBase(config)}/activities/attachments/${encodeURIComponent(item.image_id)}`);
     url.searchParams.set("name", config.activity.name ?? "autoloop");
@@ -410,7 +446,7 @@ async function downloadAttachments(config: Config, hub: Hub, context: unknown, l
     const mediaType = (response.headers.get("content-type") ?? "").split(";")[0].trim();
     if (!/^image\/(png|jpeg|webp|gif)$/.test(mediaType)) throw new Error("主程序返回的不是支持的图片类型");
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (!bytes.length || bytes.length > 24 * 1024 * 1024) throw new Error("图片为空或超过 24 MiB");
+    if (!bytes.length || bytes.length > 128 * 1024 * 1024) throw new Error("图片为空或超过 128 MiB");
     const extension = mediaType === "image/jpeg" ? "jpg" : mediaType.slice(6);
     const ordinal = typeof item.image_index === "number" ? item.image_index : index;
     const name = `screenshot-${index + 1}-${ordinal}.${extension}`;
@@ -468,7 +504,7 @@ export function createService(config: Config, hub: Hub, log = (_line: string) =>
       try {
         attachments = await downloadAttachments(current, hub, context, log);
       } catch (error) {
-        return fail(`截图附件没有交上：${(error as Error).message}`);
+        return fail(`附件没有交上：${(error as Error).message}`);
       }
       const event = eventOf(target, project, input.text, sender, undefined, attachments);
       try {
